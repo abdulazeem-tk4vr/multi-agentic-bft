@@ -1,0 +1,3 @@
+# Keep directory in VCS; ignore runtime log files
+*.log
+*.log.*

@@ -23,10 +23,12 @@ def emit_protocol_started(
         {
             "protocolType": "aegean",
             "config": {
-                "maxRounds": aegean_config["max_rounds"],
-                "confidenceThreshold": aegean_config["confidence_threshold"],
-                "byzantineTolerance": aegean_config["byzantine_tolerance"],
+                "maxRounds": aegean_config.get("max_rounds", 3),
+                "confidenceThreshold": aegean_config.get("confidence_threshold", 0.7),
+                "byzantineTolerance": aegean_config.get("byzantine_tolerance", 0),
                 "agentCount": agent_count,
+                "alphaQuorum": aegean_config.get("alpha", 2),
+                "betaStability": aegean_config.get("beta", 2),
             },
         },
         session_id=session_id,

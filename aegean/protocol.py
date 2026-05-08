@@ -1,10 +1,20 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import asdict
-from typing import Any, Protocol
-import time
+from typing import Any, Callable, Protocol
 
+from .decision_engine import DecisionEngine, DecisionEngineConfig
+from .election import (
+    LocalElectionState,
+    as_refinement_list,
+    local_election_states_for_experts,
+    new_term_ack_from_mapping,
+    recovery_acks_all_bottom,
+    simulate_leader_election,
+    select_recovery_ack,
+)
+from .election_transport import run_election_with_messenger
 from .events import (
     EventBus,
     emit_aegean_quorum_detected,
@@ -16,21 +26,97 @@ from .events import (
 )
 from .helpers_utils import (
     EvaluateQuorumOptions,
-    create_leader_vote,
     create_proposal,
-    create_proposal_task,
     create_timeout_vote,
-    create_vote_from_output,
-    create_vote_task,
     evaluate_quorum_status,
     now_ms,
     select_leader,
 )
-from .types import AegeanConfig, AegeanResult, AegeanRound, AgentVote, QuorumStatus, is_consensus_failed
+from .logutil import configure_aegean_file_logging, get_aegean_logger
+from .refinement_state import PerAgentRefmRoundTrack
+from .task_routing import build_refm_task, build_soln_task, refm_task_matches_round
+from .types import (
+    AegeanConfig,
+    AegeanResult,
+    AegeanRound,
+    AgentVote,
+    CommitCertificate,
+    QuorumStatus,
+    calculate_quorum_size,
+    is_consensus_failed,
+    validate_failstop_fault_bound,
+)
+
+_log = get_aegean_logger("protocol")
 
 
 class Agent(Protocol):
     def execute(self, task: dict[str, Any]) -> dict[str, Any]: ...
+
+
+def _accept_vote(agent_id: str, proposal_id: str, *, confidence: float = 1.0) -> AgentVote:
+    return AgentVote(
+        agent_id=agent_id,
+        proposal_id=proposal_id,
+        status="accept",
+        confidence=confidence,
+        timestamp=now_ms(),
+    )
+
+
+def _vote_from_ok_exec(
+    agent_id: str,
+    proposal_id: str,
+    exec_r: dict[str, Any],
+    confidence_threshold: float,
+) -> tuple[AgentVote, Any | None, int]:
+    """Map a successful agent ``execute`` result to accept vs excluded (low confidence) row."""
+    val = exec_r["value"]
+    meta = val.get("metadata") or {}
+    conf = float(meta.get("confidence", 1.0))
+    tok = int(meta.get("tokens_used", 0))
+    out = val.get("output")
+    if conf < confidence_threshold:
+        return (
+            AgentVote(
+                agent_id=agent_id,
+                proposal_id=proposal_id,
+                status="timeout",
+                confidence=conf,
+                timestamp=now_ms(),
+                reasoning="below confidence_threshold",
+            ),
+            None,
+            tok,
+        )
+    return _accept_vote(agent_id, proposal_id, confidence=conf), out, tok
+
+
+def _join_expert_futures(
+    experts: list[str],
+    futures: dict[str, Future],
+    *,
+    timeout_ms: int,
+    timeout_row: Callable[[str], tuple[AgentVote, Any | None, int]],
+) -> tuple[list[tuple[AgentVote, Any | None, int]], bool]:
+    """Wait (wall-clock) up to ``timeout_ms`` for all futures; canceled stragglers use ``timeout_row``."""
+    timeout_s = max(int(timeout_ms), 1) / 1000.0
+    fut_set = set(futures.values())
+    done, not_done = wait(fut_set, timeout=timeout_s)
+    wall_timed_out = bool(not_done)
+    for fut in not_done:
+        fut.cancel()
+    rows: list[tuple[AgentVote, Any | None, int]] = []
+    for eid in experts:
+        fut = futures[eid]
+        if fut in not_done:
+            rows.append(timeout_row(eid))
+            continue
+        try:
+            rows.append(fut.result())
+        except Exception:
+            rows.append(timeout_row(eid))
+    return rows, wall_timed_out
 
 
 class AegeanProtocol:
@@ -40,16 +126,43 @@ class AegeanProtocol:
         self.config = config or AegeanConfig()
         self.event_bus = event_bus or EventBus()
         self.cancelled = False
+        configure_aegean_file_logging()
 
     def cancel(self, _reason: str) -> None:
         self.cancelled = True
 
     def execute(self, config: dict[str, Any], agents: dict[str, Agent]) -> dict[str, Any]:
+        """Run one session.
+
+        Optional ``config`` keys: ``election_messenger`` (pluggable RequestVote/Vote RPC);
+        ``refm_round_track_init`` — ``{agent_id: last_accepted_broadcast_round}`` to simulate
+        persisted RefmSet round guards (multi-term / stale delivery scenarios).
+        ``max_election_attempts`` overrides :class:`~aegean.types.AegeanConfig.max_election_attempts`
+        for election stall retries (bump term until Vote quorum or cap).
+        """
+
         experts: list[str] = config["experts"]
-        # 3f+1 gives 1 for f=0, but 3 is the structural minimum for meaningful quorum
-        min_agents = max(3, 3 * self.config.byzantine_tolerance + 1)
-        if len(experts) < min_agents:
-            return {"ok": False, "error": f"Aegean requires at least {min_agents} agents"}
+        n = len(experts)
+        f = self.config.byzantine_tolerance
+        try:
+            validate_failstop_fault_bound(n, f)
+        except ValueError as exc:
+            _log.warning("startup validation failed: %s", exc)
+            return {"ok": False, "error": str(exc)}
+        quorum_r = calculate_quorum_size(n, f)
+        _log.info(
+            "protocol execute start session_id=%s N=%s f=%s R=%s alpha=%s beta=%s "
+            "round_timeout_ms=%s confidence_threshold=%s max_election_attempts=%s",
+            config.get("session_id"),
+            n,
+            f,
+            quorum_r,
+            self.config.alpha,
+            self.config.beta,
+            self.config.round_timeout_ms,
+            self.config.confidence_threshold,
+            self.config.max_election_attempts,
+        )
         for expert in experts:
             if expert not in agents:
                 return {"ok": False, "error": f"Agent not found: {expert}"}
@@ -62,142 +175,458 @@ class AegeanProtocol:
             aegean_config=asdict(self.config),
         )
 
+        if self.cancelled:
+            res = self._final_result(start, [], "error", None, 0, None)
+            self._emit_done(res, config["session_id"])
+            return {"ok": True, "value": res}
+
+        leader_id = select_leader(experts, 0)
         rounds: list[AegeanRound] = []
         total_tokens = 0
         consensus_value: Any = None
         reason: str = "max_rounds"
+        any_wall_timeout = False
+        commit_certificate: CommitCertificate | None = None
 
-        for round_number in range(self.config.max_rounds):
+        recovery_cfg = config.get("recovery")
+        term_num = 1
+        skipped_soln = False
+        broadcast_bar = []
+        if isinstance(recovery_cfg, dict):
+            raw_acks = recovery_cfg.get("acks")
+            if raw_acks:
+                acks = [new_term_ack_from_mapping(x) for x in raw_acks]
+                if not recovery_acks_all_bottom(acks):
+                    picked = select_recovery_ack(acks)
+                    if picked is not None:
+                        leader_id = str(recovery_cfg.get("leader_id", leader_id))
+                        term_num = picked.term
+                        broadcast_bar = as_refinement_list(picked.refm_set)
+                        skipped_soln = True
+                        _log.info(
+                            "recovery: skip Round 0 Soln term=%s leader=%s r_bar_len=%s",
+                            term_num,
+                            leader_id,
+                            len(broadcast_bar),
+                        )
+
+        if agents.get(leader_id) is None:
+            return {"ok": False, "error": f"Leader agent not found: {leader_id}"}
+
+        el_terms = config.get("election_initial_terms")
+        parsed_el: dict[str, int] | None = None
+        if isinstance(el_terms, dict):
+            parsed_el = {str(k): int(v) for k, v in el_terms.items()}
+
+        raw_max_e = config.get("max_election_attempts")
+        if raw_max_e is not None:
+            try:
+                max_election_tries = max(1, int(raw_max_e))
+            except (TypeError, ValueError):
+                max_election_tries = self.config.max_election_attempts
+        else:
+            max_election_tries = self.config.max_election_attempts
+
+        election_states: dict[str, LocalElectionState] | None = None
+        custom_messenger = config.get("election_messenger")
+        if custom_messenger is None:
+            election_states = local_election_states_for_experts(experts, parsed_el)
+
+        attempt_term = term_num
+        el_out = None
+        for election_try in range(max_election_tries):
+            if custom_messenger is not None:
+                el_out = run_election_with_messenger(
+                    experts,
+                    f,
+                    term=attempt_term,
+                    candidate_id=leader_id,
+                    messenger=custom_messenger,
+                )
+            else:
+                assert election_states is not None
+                el_out = simulate_leader_election(
+                    experts,
+                    f,
+                    term=attempt_term,
+                    candidate_id=leader_id,
+                    states=election_states,
+                )
+            if el_out.has_vote_quorum:
+                term_num = attempt_term
+                if election_try > 0:
+                    _log.info(
+                        "election recovered after term bump: term=%s (after %s stall retries)",
+                        term_num,
+                        election_try,
+                    )
+                break
+            _log.info(
+                "election stall: no Vote quorum at term=%s (try %s/%s), bumping term",
+                attempt_term,
+                election_try + 1,
+                max_election_tries,
+            )
+            attempt_term += 1
+        else:
+            return {
+                "ok": False,
+                "error": (
+                    f"Leader election failed after {max_election_tries} term attempts "
+                    f"(last term tried {attempt_term})"
+                ),
+            }
+
+        if skipped_soln and len(broadcast_bar) < quorum_r:
+            emit_protocol_iteration(
+                self.event_bus, 0, self.config.max_rounds, "recovery_insufficient_bar", config["session_id"]
+            )
+            res = self._final_result(start, rounds, "max_rounds", None, 0, None)
+            self._emit_done(res, config["session_id"])
+            return {"ok": True, "value": res}
+
+        if not skipped_soln:
+            round_start0 = now_ms()
+            emit_aegean_round_started(
+                self.event_bus, 0, self.config.max_rounds, leader_id, config["session_id"]
+            )
+            soln_pid = f"soln-{config['session_id']}-0"
+
+            def _collect_soln(eid: str) -> tuple[AgentVote, Any | None, int]:
+                ag = agents.get(eid)
+                if ag is None:
+                    return create_timeout_vote(eid, soln_pid), None, 0
+                exec_r = ag.execute(build_soln_task(config["task"], round_num=0))
+                if not exec_r.get("ok", False):
+                    return create_timeout_vote(eid, soln_pid), None, 0
+                return _vote_from_ok_exec(
+                    eid, soln_pid, exec_r, self.config.confidence_threshold
+                )
+
+            with ThreadPoolExecutor(max_workers=max(4, n)) as pool:
+                soln_futs = {e: pool.submit(_collect_soln, e) for e in experts}
+                soln_rows, soln_wall_to = _join_expert_futures(
+                    experts,
+                    soln_futs,
+                    timeout_ms=self.config.round_timeout_ms,
+                    timeout_row=lambda eid: (create_timeout_vote(eid, soln_pid), None, 0),
+                )
+            if soln_wall_to:
+                any_wall_timeout = True
+
+            soln_votes: list[AgentVote] = []
+            soln_out: list[Any | None] = []
+            t0 = 0
+            for eid, (v, o, tok) in zip(experts, soln_rows, strict=True):
+                soln_votes.append(v)
+                soln_out.append(o if v.status == "accept" else None)
+                t0 += tok
+                emit_aegean_vote_collected(
+                    self.event_bus,
+                    0,
+                    eid,
+                    len(soln_votes),
+                    quorum_r,
+                    config["session_id"],
+                )
+
+            total_tokens += t0
+            li = experts.index(leader_id)
+            if soln_votes[li].status != "accept":
+                return {"ok": False, "error": "Leader soln generation failed"}
+
+            q0 = evaluate_quorum_status(
+                EvaluateQuorumOptions(votes=soln_votes, total_agents=n, byzantine_tolerance=f)
+            )
+            quorum0 = QuorumStatus(**q0)
+            broadcast_bar = [o for o in soln_out if o is not None]
+            proposal0 = create_proposal(0, leader_id, list(broadcast_bar))
+            rounds.append(
+                AegeanRound(
+                    round_number=0,
+                    phase="proposal",
+                    leader_id=leader_id,
+                    proposal=proposal0,
+                    votes=soln_votes,
+                    quorum_status=quorum0,
+                    start_time=round_start0,
+                    end_time=now_ms(),
+                )
+            )
+
+            if quorum0.has_quorum:
+                emit_aegean_quorum_detected(
+                    self.event_bus,
+                    0,
+                    quorum0.accepts,
+                    self.config.early_termination,
+                    config["session_id"],
+                )
+
+            if not quorum0.has_quorum:
+                emit_protocol_iteration(
+                    self.event_bus, 0, self.config.max_rounds, "no_soln_quorum", config["session_id"]
+                )
+                soln_term: str = "timeout" if any_wall_timeout else "max_rounds"
+                res = self._final_result(start, rounds, soln_term, None, total_tokens, None)
+                self._emit_done(res, config["session_id"])
+                return {"ok": True, "value": res}
+
+        engine = DecisionEngine(DecisionEngineConfig(self.config.alpha, self.config.beta))
+        engine.on_new_term(term_num)
+
+        ref_round_tracks = {e: PerAgentRefmRoundTrack() for e in experts}
+        ri = config.get("refm_round_track_init")
+        if isinstance(ri, dict):
+            for key, val in ri.items():
+                kid = str(key)
+                if kid not in ref_round_tracks:
+                    continue
+                try:
+                    ref_round_tracks[kid].last_accepted_broadcast_round = int(val)
+                except (TypeError, ValueError):
+                    _log.warning("ignore invalid refm_round_track_init[%s]=%r", key, val)
+
+        ref_round = 1
+        while ref_round <= self.config.max_rounds:
             if self.cancelled:
                 reason = "error"
                 break
 
-            result = self._execute_round(round_number, config, agents)
-            if not result["ok"]:
-                return result
-            round_data: AegeanRound = result["round_data"]
-            tokens_used: int = result["tokens_used"]
+            rs = now_ms()
+            emit_aegean_round_started(
+                self.event_bus, ref_round, self.config.max_rounds, leader_id, config["session_id"]
+            )
+            ref_pid = f"refm-{config['session_id']}-t{term_num}-r{ref_round}"
 
-            rounds.append(round_data)
-            total_tokens += tokens_used
-
-            if round_data.quorum_status.consensus_reached:
-                consensus_value = round_data.proposal.value if round_data.proposal else None
-                reason = "consensus"
-                emit_protocol_iteration(
-                    self.event_bus, round_number, self.config.max_rounds, "converged", config["session_id"]
+            def _collect_refm(eid: str) -> tuple[AgentVote, Any | None, int]:
+                ag = agents.get(eid)
+                if ag is None:
+                    return create_timeout_vote(eid, ref_pid), None, 0
+                tsk = build_refm_task(
+                    config["task"],
+                    refinement_set=list(broadcast_bar),
+                    term_num=term_num,
+                    round_num=ref_round,
+                    agent_id=eid,
                 )
-                break
-
-            if self.config.early_termination and is_consensus_failed(round_data.quorum_status, len(experts)):
-                reason = "max_rounds"
-                emit_protocol_iteration(
-                    self.event_bus, round_number, self.config.max_rounds, "max_reached", config["session_id"]
+                if not refm_task_matches_round(tsk, ref_round):
+                    return create_timeout_vote(eid, ref_pid), None, 0
+                if not ref_round_tracks[eid].try_accept_refm_broadcast(ref_round):
+                    return create_timeout_vote(eid, ref_pid), None, 0
+                exec_r = ag.execute(tsk)
+                if not exec_r.get("ok", False):
+                    return create_timeout_vote(eid, ref_pid), None, 0
+                return _vote_from_ok_exec(
+                    eid, ref_pid, exec_r, self.config.confidence_threshold
                 )
-                break
 
-            emit_protocol_iteration(
-                self.event_bus, round_number, self.config.max_rounds, "in_progress", config["session_id"]
+            with ThreadPoolExecutor(max_workers=max(4, n)) as pool:
+                ref_futs = {e: pool.submit(_collect_refm, e) for e in experts}
+                ref_rows, ref_wall_to = _join_expert_futures(
+                    experts,
+                    ref_futs,
+                    timeout_ms=self.config.round_timeout_ms,
+                    timeout_row=lambda eid: (create_timeout_vote(eid, ref_pid), None, 0),
+                )
+            if ref_wall_to:
+                any_wall_timeout = True
+
+            ref_votes: list[AgentVote] = []
+            ref_out: list[Any | None] = []
+            tr = 0
+            for eid, (v, o, tok) in zip(experts, ref_rows, strict=True):
+                ref_votes.append(v)
+                ref_out.append(o if v.status == "accept" else None)
+                tr += tok
+                emit_aegean_vote_collected(
+                    self.event_bus,
+                    ref_round,
+                    eid,
+                    len(ref_votes),
+                    quorum_r,
+                    config["session_id"],
+                )
+
+            total_tokens += tr
+            qref = evaluate_quorum_status(
+                EvaluateQuorumOptions(votes=ref_votes, total_agents=n, byzantine_tolerance=f)
+            )
+            qref_s = QuorumStatus(**qref)
+            ref_proposal = create_proposal(ref_round, leader_id, list(broadcast_bar))
+            t_done = now_ms()
+
+            if not qref_s.has_quorum:
+                rounds.append(
+                    AegeanRound(
+                        round_number=ref_round,
+                        phase="refinement",
+                        leader_id=leader_id,
+                        proposal=ref_proposal,
+                        votes=ref_votes,
+                        quorum_status=qref_s,
+                        start_time=rs,
+                        end_time=t_done,
+                    )
+                )
+                if self.config.early_termination and is_consensus_failed(qref_s, n):
+                    emit_protocol_iteration(
+                        self.event_bus,
+                        ref_round - 1,
+                        self.config.max_rounds,
+                        "max_reached",
+                        config["session_id"],
+                    )
+                    break
+                emit_protocol_iteration(
+                    self.event_bus,
+                    ref_round - 1,
+                    self.config.max_rounds,
+                    "no_refm_quorum",
+                    config["session_id"],
+                )
+                ref_round += 1
+                continue
+
+            emit_aegean_quorum_detected(
+                self.event_bus,
+                ref_round,
+                qref_s.accepts,
+                self.config.early_termination,
+                config["session_id"],
             )
 
-        aegean_result = AegeanResult(
+            ref_vals = [ref_out[i] for i in range(n) if ref_votes[i].status == "accept"]
+            decision = engine.step(r_bar_prev=list(broadcast_bar), current_round_outputs=ref_vals)
+            _log.debug(
+                "ref_round=%s committed=%s stability=%s candidate=%s",
+                ref_round,
+                decision.committed,
+                decision.stability,
+                decision.eligible_candidate,
+            )
+            t_after_decision = now_ms()
+            rounds.append(
+                AegeanRound(
+                    round_number=ref_round,
+                    phase="refinement",
+                    leader_id=leader_id,
+                    proposal=ref_proposal,
+                    votes=ref_votes,
+                    quorum_status=qref_s,
+                    start_time=rs,
+                    end_time=t_after_decision,
+                    decision_committed=decision.committed,
+                    decision_stability=decision.stability,
+                    decision_eligible=decision.eligible_candidate,
+                    decision_overturned=decision.overturned,
+                )
+            )
+
+            if decision.committed:
+                consensus_value = decision.value
+                reason = "consensus"
+                supporting = tuple(
+                    eid for eid, rv in zip(experts, ref_votes, strict=True) if rv.status == "accept"
+                )
+                commit_certificate = CommitCertificate(
+                    term_num=term_num,
+                    refinement_round=ref_round,
+                    leader_id=leader_id,
+                    committed_value=consensus_value,
+                    quorum_size_r=quorum_r,
+                    alpha=self.config.alpha,
+                    beta=self.config.beta,
+                    supporting_refm_agent_ids=supporting,
+                )
+                commit_prop = create_proposal(ref_round, leader_id, [consensus_value])
+                rounds.append(
+                    AegeanRound(
+                        round_number=ref_round,
+                        phase="commit",
+                        leader_id=leader_id,
+                        proposal=commit_prop,
+                        votes=[],
+                        quorum_status=QuorumStatus(
+                            required=quorum_r,
+                            accepts=len(supporting),
+                            rejects=0,
+                            pending=0,
+                            has_quorum=True,
+                            consensus_reached=True,
+                        ),
+                        start_time=t_after_decision,
+                        end_time=now_ms(),
+                    )
+                )
+                emit_protocol_iteration(
+                    self.event_bus,
+                    ref_round - 1,
+                    self.config.max_rounds,
+                    "converged",
+                    config["session_id"],
+                )
+                break
+
+            if self.config.early_termination and is_consensus_failed(qref_s, n):
+                emit_protocol_iteration(
+                    self.event_bus,
+                    ref_round - 1,
+                    self.config.max_rounds,
+                    "max_reached",
+                    config["session_id"],
+                )
+                break
+
+            nxt = [ref_out[i] for i in range(n) if ref_votes[i].status == "accept"]
+            if len(nxt) < quorum_r:
+                break
+            broadcast_bar = nxt
+
+            emit_protocol_iteration(
+                self.event_bus,
+                ref_round - 1,
+                self.config.max_rounds,
+                "in_progress",
+                config["session_id"],
+            )
+            ref_round += 1
+
+        if reason not in ("consensus", "error") and any_wall_timeout:
+            reason = "timeout"
+
+        res = self._final_result(start, rounds, reason, consensus_value, total_tokens, commit_certificate)
+        self._emit_done(res, config["session_id"])
+        return {"ok": True, "value": res}
+
+    def _final_result(
+        self,
+        start_ms: int,
+        rounds: list[AegeanRound],
+        reason: str,
+        consensus_value: Any | None,
+        total_tokens: int,
+        commit_certificate: CommitCertificate | None,
+    ) -> AegeanResult:
+        return AegeanResult(
             consensus_value=consensus_value,
             consensus_reached=reason == "consensus",
             total_rounds=len(rounds),
-            total_duration_ms=now_ms() - start,
+            total_duration_ms=now_ms() - start_ms,
             tokens_used=total_tokens,
             rounds=rounds,
             termination_reason=reason,  # type: ignore[arg-type]
+            commit_certificate=commit_certificate,
         )
+
+    def _emit_done(self, aegean_result: AegeanResult, session_id: str) -> None:
         emit_protocol_completed(
             self.event_bus,
             success=aegean_result.consensus_reached,
             iterations=aegean_result.total_rounds,
             duration_ms=aegean_result.total_duration_ms,
-            session_id=config["session_id"],
+            session_id=session_id,
         )
-        return {"ok": True, "value": aegean_result}
-
-    def _execute_round(self, round_number: int, config: dict[str, Any], agents: dict[str, Agent]) -> dict[str, Any]:
-        round_start = now_ms()
-        experts: list[str] = config["experts"]
-        leader_id = select_leader(experts, round_number)
-        leader = agents.get(leader_id)
-        if leader is None:
-            return {"ok": False, "error": f"Leader agent not found: {leader_id}"}
-
-        emit_aegean_round_started(
-            self.event_bus, round_number, self.config.max_rounds, leader_id, config["session_id"]
-        )
-
-        proposal_task = create_proposal_task(config["task"], round_number)
-        proposal_exec = leader.execute(proposal_task)
-        if not proposal_exec.get("ok", False):
-            return {"ok": False, "error": "Leader proposal generation failed"}
-        proposal_output = proposal_exec["value"]["output"]
-        proposal_tokens = proposal_exec["value"]["metadata"]["tokens_used"]
-        proposal = create_proposal(round_number, leader_id, proposal_output)
-
-        voter_ids = [e for e in experts if e != leader_id]
-        required_quorum = evaluate_quorum_status(
-            EvaluateQuorumOptions(votes=[], total_agents=len(experts), byzantine_tolerance=self.config.byzantine_tolerance)
-        )["required"]
-
-        def _collect_vote(voter_id: str) -> tuple[AgentVote, int]:
-            agent = agents.get(voter_id)
-            if agent is None:
-                return create_timeout_vote(voter_id, proposal.proposal_id), 0
-            vote_exec = agent.execute(create_vote_task(proposal, voter_id))
-            if not vote_exec.get("ok", False):
-                return create_timeout_vote(voter_id, proposal.proposal_id), 0
-            result = create_vote_from_output(
-                voter_id,
-                proposal.proposal_id,
-                vote_exec["value"]["output"],
-                vote_exec["value"]["metadata"]["tokens_used"],
-            )
-            return result["vote"], result["tokens_used"]
-
-        with ThreadPoolExecutor() as pool:
-            futures = {voter_id: pool.submit(_collect_vote, voter_id) for voter_id in voter_ids}
-
-        votes: list[AgentVote] = []
-        vote_tokens = 0
-        for voter_id in voter_ids:
-            vote, tokens = futures[voter_id].result()
-            votes.append(vote)
-            vote_tokens += tokens
-            emit_aegean_vote_collected(
-                self.event_bus, round_number, voter_id, len(votes), required_quorum, config["session_id"]
-            )
-
-        votes.append(create_leader_vote(leader_id, proposal.proposal_id))
-        quorum_dict = evaluate_quorum_status(
-            EvaluateQuorumOptions(
-                votes=votes, total_agents=len(experts), byzantine_tolerance=self.config.byzantine_tolerance
-            )
-        )
-        quorum = QuorumStatus(**quorum_dict)
-        if quorum.has_quorum:
-            emit_aegean_quorum_detected(
-                self.event_bus,
-                round_number,
-                quorum.accepts,
-                self.config.early_termination,
-                config["session_id"],
-            )
-
-        round_data = AegeanRound(
-            round_number=round_number,
-            phase="done",
-            leader_id=leader_id,
-            proposal=proposal,
-            votes=votes,
-            quorum_status=quorum,
-            start_time=round_start,
-            end_time=now_ms(),
-        )
-        return {"ok": True, "round_data": round_data, "tokens_used": proposal_tokens + vote_tokens}
 
 
 def create_aegean_protocol(config: AegeanConfig | None = None, event_bus: EventBus | None = None) -> AegeanProtocol:

@@ -25,7 +25,28 @@ def test_emit_protocol_started():
     assert event["topic"] == "protocol.started"
     assert event["payload"]["protocolType"] == "aegean"
     assert event["payload"]["config"]["agentCount"] == 5
+    assert event["payload"]["config"]["alphaQuorum"] == 2
+    assert event["payload"]["config"]["betaStability"] == 2
     assert event["session_id"] == "s1"
+
+
+def test_emit_protocol_started_alpha_beta_from_config():
+    bus = EventBus()
+    emit_protocol_started(
+        bus,
+        session_id="s1",
+        agent_count=4,
+        aegean_config={
+            "max_rounds": 3,
+            "confidence_threshold": 0.8,
+            "byzantine_tolerance": 1,
+            "alpha": 3,
+            "beta": 1,
+        },
+    )
+    cfg = bus.emitted_events[0]["payload"]["config"]
+    assert cfg["alphaQuorum"] == 3
+    assert cfg["betaStability"] == 1
 
 
 def test_emit_protocol_iteration_round_is_one_indexed():

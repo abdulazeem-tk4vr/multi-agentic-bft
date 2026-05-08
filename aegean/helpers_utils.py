@@ -6,7 +6,10 @@ import json
 import re
 import time
 
+from .logutil import get_aegean_logger
 from .types import AgentVote, Proposal, calculate_quorum_size
+
+_log = get_aegean_logger("quorum")
 
 ACCEPT_PATTERN = re.compile(r"accept|approve|agree|yes", re.IGNORECASE)
 REJECT_PATTERN = re.compile(r"reject|disapprove|disagree|no", re.IGNORECASE)
@@ -110,6 +113,24 @@ def select_leader(experts: list[str], round_number: int) -> str:
     return experts[idx]
 
 
+def dedupe_votes_by_agent_last_wins(
+    votes: list[AgentVote],
+) -> tuple[list[AgentVote], frozenset[str]]:
+    """One tally slot per ``agent_id``: later entries override earlier (duplicate ids do not inflate R).
+
+    Returns ``(unique_votes, duplicate_agent_ids)`` where duplicates were detected when the same
+    ``agent_id`` appeared more than once in ``votes``.
+    """
+    last_by_agent: dict[str, AgentVote] = {}
+    duplicate_ids: set[str] = set()
+    for v in votes:
+        if v.agent_id in last_by_agent:
+            duplicate_ids.add(v.agent_id)
+        last_by_agent[v.agent_id] = v
+    unique = list(last_by_agent.values())
+    return unique, frozenset(duplicate_ids)
+
+
 @dataclass(frozen=True)
 class EvaluateQuorumOptions:
     votes: list[AgentVote]
@@ -118,10 +139,14 @@ class EvaluateQuorumOptions:
 
 
 def evaluate_quorum_status(opts: EvaluateQuorumOptions) -> dict[str, Any]:
+    """Tally accepts/rejects/pending with **unique agent ids**; same **R** as Soln/Refm (via ``calculate_quorum_size``)."""
     required = calculate_quorum_size(opts.total_agents, opts.byzantine_tolerance)
-    accepts = len([v for v in opts.votes if v.status == "accept"])
-    rejects = len([v for v in opts.votes if v.status == "reject"])
-    pending = len([v for v in opts.votes if v.status in ("pending", "timeout")])
+    unique_votes, duplicate_ids = dedupe_votes_by_agent_last_wins(opts.votes)
+    if duplicate_ids:
+        _log.warning("duplicate vote entries for agent ids %s (using last vote per id for quorum tally)", sorted(duplicate_ids))
+    accepts = len([v for v in unique_votes if v.status == "accept"])
+    rejects = len([v for v in unique_votes if v.status == "reject"])
+    pending = len([v for v in unique_votes if v.status in ("pending", "timeout")])
     has_quorum = accepts >= required
     return {
         "required": required,

@@ -3,6 +3,9 @@ from aegean.types import QuorumStatus
 from aegean.events import EventBus
 
 
+from aegean.task_routing import PHASE_REFM, aegean_task_phase
+
+
 class ConfigurableAgent:
     def __init__(self, proposal_output: str, vote_output: str, tokens: int = 25):
         self.proposal_output = proposal_output
@@ -10,8 +13,12 @@ class ConfigurableAgent:
         self.tokens = tokens
 
     def execute(self, task):
-        is_vote = str(task.get("id", "")).startswith("vote-")
-        output = self.vote_output if is_vote else self.proposal_output
+        if aegean_task_phase(task) == PHASE_REFM:
+            output = self.proposal_output
+        elif str(task.get("id", "")).startswith("vote-"):
+            output = self.vote_output
+        else:
+            output = self.proposal_output
         return {"ok": True, "value": {"output": output, "metadata": {"tokens_used": self.tokens}}}
 
 
@@ -29,9 +36,9 @@ def test_quorum_formation_e2e():
     protocol = create_aegean_protocol(event_bus=bus)
     config = make_config(["agent1", "agent2", "agent3"])
     agents = {
-        "agent1": ConfigurableAgent("Proposal", "ACCEPT"),
-        "agent2": ConfigurableAgent("N/A", "ACCEPT"),
-        "agent3": ConfigurableAgent("N/A", "ACCEPT"),
+        "agent1": ConfigurableAgent("P", "ACCEPT"),
+        "agent2": ConfigurableAgent("P", "ACCEPT"),
+        "agent3": ConfigurableAgent("P", "ACCEPT"),
     }
     result = protocol.execute(config, agents)
     assert result["ok"] is True
@@ -39,8 +46,9 @@ def test_quorum_formation_e2e():
 
 
 def test_quorum_math():
-    assert calculate_quorum_size(3, 0) == 2
-    assert calculate_quorum_size(5, 0) == 3
+    # Fail-stop paper quorum R = N - f (not ⌈(N+f+1)/2⌉).
+    assert calculate_quorum_size(3, 0) == 3
+    assert calculate_quorum_size(5, 0) == 5
     assert calculate_quorum_size(4, 1) == 3
 
 
