@@ -24,7 +24,8 @@ Working target: **paper-faithful fail-stop Aegean** in `aegean/` (`R = N − f`,
 ---
 
 ### Slice 4 — Task routing & scripted agent (no LLM)
-- **`aegean/task_routing.py`**: **`aegean_task_phase`** / **`refinement_context`** read **`context["aegean"]`**. **`build_soln_task`** tags round‑0 Soln work; **`build_refm_task`** builds Refm prompts with **`refinement_set`**, **`term_num`**, **`round_num`**. **`ScriptedAegeanAgent`** branches on phase (fixed values or callables).
+- **`aegean/task_routing.py`**: **`aegean_task_phase`** / **`refinement_context`** read **`context["aegean"]`**. **`build_soln_task`** tags round‑0 Soln work; **`build_refm_task`** builds Refm prompts with **`refinement_set`**, **`term_num`**, **`round_num`**.
+- **`aegean/mocks/scripted_agent.py`**: **`ScriptedAegeanAgent`** mock implementation that branches on phase (fixed values or callables).
 - **`aegean/__init__.py`**: Re-exports routing helpers + **`ScriptedAegeanAgent`**.
 - **Tests**: `tests/test_aegean_task_routing.py`.
 
@@ -91,6 +92,15 @@ Working target: **paper-faithful fail-stop Aegean** in `aegean/` (`R = N − f`,
 - **`aegean/benchmark.py`**: **Fixed-round majority** token proxy (**N×Soln + max_ref_rounds×N×Refm**); :func:`~aegean.benchmark.count_refinement_rounds`; :func:`~aegean.benchmark.inference_reduction_vs_fixed_schedule` / :class:`~aegean.benchmark.InferenceReductionReport` vs analytic upper bound; :func:`~aegean.benchmark.summarize_for_logging`.
 - **`aegean/__init__.py`**: Re-exports benchmark helpers.
 - **Tests**: **`tests/test_benchmark_inference_reduction.py`**.
+
+---
+
+### Slice 16 — Production adapters (generic HTTP + OpenRouter)
+- **`aegean/adapters/http_agent.py`**: **`HttpAgent`** generic remote `POST` adapter (stdlib `urllib`), expects protocol-compatible JSON response shape.
+- **`aegean/adapters/openrouter_agent.py`**: **`OpenRouterAgent`** adapter for OpenRouter chat completions with usage-to-`tokens_used` mapping.
+- **`aegean/adapters/base.py`**: **`ok_result`** / **`error_result`** helpers for writing custom adapters consistently.
+- **`aegean/__init__.py`**: Re-exports adapter classes and helper result builders.
+- **Tests**: **`tests/test_adapters.py`**.
 
 ---
 

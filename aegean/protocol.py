@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import asdict
 from typing import Any, Callable, Protocol
@@ -92,6 +93,38 @@ def _vote_from_ok_exec(
     return _accept_vote(agent_id, proposal_id, confidence=conf), out, tok
 
 
+def _validate_exec_result_shape(exec_r: Any) -> str | None:
+    """Return an error string when execute() result shape is invalid, else None."""
+    if not isinstance(exec_r, dict):
+        return "execute() must return a dict"
+    ok_val = exec_r.get("ok")
+    if not isinstance(ok_val, bool):
+        return "execute() result must include boolean key 'ok'"
+    if not ok_val:
+        return None
+    val = exec_r.get("value")
+    if not isinstance(val, dict):
+        return "execute() with ok=True must include dict key 'value'"
+    if "output" not in val:
+        return "execute() with ok=True must include value['output']"
+    meta = val.get("metadata")
+    if meta is not None and not isinstance(meta, dict):
+        return "execute() metadata must be a dict when provided"
+    return None
+
+
+def _is_production_env(config: dict[str, Any]) -> bool:
+    env_val = config.get("environment")
+    if env_val is None:
+        env_val = os.getenv("AEGEAN_ENV") or os.getenv("ENV") or os.getenv("APP_ENV")
+    env = str(env_val or "").strip().lower()
+    return env in {"prod", "production"}
+
+
+def _agent_is_mock(agent: Any) -> bool:
+    return str(getattr(agent.__class__, "__module__", "")).startswith("aegean.mocks")
+
+
 def _join_expert_futures(
     experts: list[str],
     futures: dict[str, Future],
@@ -166,6 +199,17 @@ class AegeanProtocol:
         for expert in experts:
             if expert not in agents:
                 return {"ok": False, "error": f"Agent not found: {expert}"}
+        if _is_production_env(config):
+            for expert in experts:
+                agent = agents.get(expert)
+                if agent is not None and _agent_is_mock(agent):
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"Mock agent not allowed in production environment: {expert} "
+                            f"({agent.__class__.__module__}.{agent.__class__.__name__})"
+                        ),
+                    }
 
         start = now_ms()
         emit_protocol_started(
@@ -297,6 +341,10 @@ class AegeanProtocol:
                 if ag is None:
                     return create_timeout_vote(eid, soln_pid), None, 0
                 exec_r = ag.execute(build_soln_task(config["task"], round_num=0))
+                shape_err = _validate_exec_result_shape(exec_r)
+                if shape_err is not None:
+                    _log.warning("invalid execute() result for agent=%s phase=soln: %s", eid, shape_err)
+                    return create_timeout_vote(eid, soln_pid), None, 0
                 if not exec_r.get("ok", False):
                     return create_timeout_vote(eid, soln_pid), None, 0
                 return _vote_from_ok_exec(
@@ -415,6 +463,10 @@ class AegeanProtocol:
                 if not ref_round_tracks[eid].try_accept_refm_broadcast(ref_round):
                     return create_timeout_vote(eid, ref_pid), None, 0
                 exec_r = ag.execute(tsk)
+                shape_err = _validate_exec_result_shape(exec_r)
+                if shape_err is not None:
+                    _log.warning("invalid execute() result for agent=%s phase=refm: %s", eid, shape_err)
+                    return create_timeout_vote(eid, ref_pid), None, 0
                 if not exec_r.get("ok", False):
                     return create_timeout_vote(eid, ref_pid), None, 0
                 return _vote_from_ok_exec(

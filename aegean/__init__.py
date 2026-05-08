@@ -66,13 +66,14 @@ from .benchmark import (
 from .task_routing import (
     PHASE_REFM,
     PHASE_SOLN,
-    ScriptedAegeanAgent,
     aegean_task_phase,
     build_refm_task,
     build_soln_task,
     refinement_context,
     refm_task_matches_round,
 )
+from .mocks import ScriptedAegeanAgent
+from .adapters import HttpAgent, OpenRouterAgent, error_result, ok_result
 
 __all__ = [
     "AegeanConfig",
@@ -94,6 +95,10 @@ __all__ = [
     "PHASE_REFM",
     "PHASE_SOLN",
     "ScriptedAegeanAgent",
+    "HttpAgent",
+    "OpenRouterAgent",
+    "ok_result",
+    "error_result",
     "aegean_task_phase",
     "build_refm_task",
     "build_soln_task",

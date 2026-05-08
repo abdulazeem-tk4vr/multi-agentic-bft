@@ -1,13 +1,13 @@
 from aegean.task_routing import (
     PHASE_REFM,
     PHASE_SOLN,
-    ScriptedAegeanAgent,
     aegean_task_phase,
     build_refm_task,
     build_soln_task,
     refinement_context,
     refm_task_matches_round,
 )
+from tests.mocks import ScriptedAegeanAgent
 
 
 def test_aegean_task_phase_defaults_to_soln():

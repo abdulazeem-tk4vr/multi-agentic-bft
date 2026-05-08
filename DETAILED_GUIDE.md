@@ -152,6 +152,18 @@ The current decision engine uses equality clustering by default; deeper semantic
 
 ---
 
+## Production Adapter Reference
+
+Reference implementations:
+
+- `aegean/adapters/http_agent.py` (`HttpAgent`) for generic HTTP workflows.
+- `aegean/adapters/openrouter_agent.py` (`OpenRouterAgent`) for OpenRouter-backed inference.
+- `aegean/adapters/base.py` (`ok_result`, `error_result`) helper utilities for custom adapters.
+
+Use these modules as canonical examples for implementing `execute(task)` in production.
+
+---
+
 ## Observability
 
 Pass `EventBus` to `create_aegean_protocol`. Event topics include:
