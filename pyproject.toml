@@ -15,6 +15,13 @@ dev = ["pytest>=8.0.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
+# Default: unit/static only (excludes ``live``). Live: ``pytest -m live``. Everything: ``pytest --override-ini addopts=``.
+addopts = "-m \"not live\""
+markers = [
+    "live: full Aegean protocol sessions (integration-style), not isolated unit tests",
+    "stress: heavier load tests without semantic similarity (subset of live; pytest -m \"live and stress\")",
+]
 
 [tool.setuptools.packages.find]
 include = ["aegean*"]

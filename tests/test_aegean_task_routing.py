@@ -42,6 +42,18 @@ def test_refinement_context_roundtrip():
     assert "refm-t1-r2-agent-1" in refm["id"]
 
 
+def test_build_soln_task_includes_agent_id_when_passed():
+    base = {"id": "t", "description": "d", "context": {}}
+    soln = build_soln_task(base, round_num=0, agent_id="expert-2")
+    assert soln["context"]["aegean"]["agent_id"] == "expert-2"
+
+
+def test_build_refm_task_includes_agent_id_in_aegean_bag():
+    base = {"id": "t", "description": "d", "context": {}}
+    refm = build_refm_task(base, refinement_set=[], term_num=1, round_num=1, agent_id="z")
+    assert refm["context"]["aegean"]["agent_id"] == "z"
+
+
 def test_build_soln_task_tags_context():
     base = {"id": "root", "description": "Q", "context": {"extra": 1}}
     soln = build_soln_task(base, round_num=0)

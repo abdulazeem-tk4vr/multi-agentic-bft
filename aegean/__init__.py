@@ -20,7 +20,14 @@ from .types import (
 )
 from .events import EventBus
 from .helpers_utils import dedupe_votes_by_agent_last_wins
-from .protocol import AegeanProtocol, create_aegean_protocol
+from .protocol import (
+    AegeanProtocol,
+    AegeanRunner,
+    AegeanSessionError,
+    create_aegean_protocol,
+    run_aegean_session,
+)
+from .session_trace import print_session_trace, session_trace_enabled
 from .decision_engine import (
     DecisionEngine,
     DecisionEngineConfig,
@@ -73,7 +80,14 @@ from .task_routing import (
     refm_task_matches_round,
 )
 from .mocks import ScriptedAegeanAgent
-from .adapters import HttpAgent, OpenRouterAgent, error_result, ok_result
+from .adapters import (
+    HttpAgent,
+    OpenRouterAgent,
+    error_result,
+    http_agents_from_endpoints,
+    normalize_agent_endpoint,
+    ok_result,
+)
 
 __all__ = [
     "AegeanConfig",
@@ -90,13 +104,20 @@ __all__ = [
     "is_refm_bottom",
     "EventBus",
     "AegeanProtocol",
+    "AegeanRunner",
+    "AegeanSessionError",
     "create_aegean_protocol",
+    "run_aegean_session",
+    "print_session_trace",
+    "session_trace_enabled",
     "dedupe_votes_by_agent_last_wins",
     "PHASE_REFM",
     "PHASE_SOLN",
     "ScriptedAegeanAgent",
     "HttpAgent",
     "OpenRouterAgent",
+    "http_agents_from_endpoints",
+    "normalize_agent_endpoint",
     "ok_result",
     "error_result",
     "aegean_task_phase",

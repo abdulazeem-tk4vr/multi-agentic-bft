@@ -1,6 +1,12 @@
 import json
 
-from aegean.adapters import HttpAgent, OpenRouterAgent
+from aegean import build_refm_task
+from aegean.adapters import (
+    HttpAgent,
+    OpenRouterAgent,
+    http_agents_from_endpoints,
+    normalize_agent_endpoint,
+)
 
 
 class _Resp:
@@ -15,6 +21,24 @@ class _Resp:
 
     def __exit__(self, exc_type, exc, tb):
         return False
+
+
+def test_normalize_agent_endpoint_host_port():
+    assert normalize_agent_endpoint("10.0.0.5:9000") == "http://10.0.0.5:9000/execute"
+    assert normalize_agent_endpoint("http://192.168.1.1") == "http://192.168.1.1/execute"
+
+
+def test_normalize_agent_endpoint_preserves_custom_path():
+    assert (
+        normalize_agent_endpoint("https://worker.example.com/v1/aegean")
+        == "https://worker.example.com/v1/aegean"
+    )
+
+
+def test_http_agents_from_endpoints_builds_map():
+    m = http_agents_from_endpoints({"a1": "127.0.0.1:1", "a2": "http://127.0.0.1:2/custom"}, execute_path="/run")
+    assert m["a1"].endpoint == "http://127.0.0.1:1/run"
+    assert m["a2"].endpoint == "http://127.0.0.1:2/custom"
 
 
 def test_http_agent_happy_path(monkeypatch):
@@ -57,3 +81,33 @@ def test_openrouter_agent_requires_api_key():
     out = agent.execute({"id": "t1", "description": "x", "context": {}})
     assert out["ok"] is False
     assert "API_KEY" in out["error"]
+
+
+def test_openrouter_refm_user_message_does_not_duplicate_refinement_set(monkeypatch):
+    """R̄ must appear once in the chat user text — not in ``description`` and again as a peer block."""
+
+    marker = "UNIQUE_RBAR_TOKEN_FOR_DEDUPE_TEST"
+
+    def _fake_urlopen(req, timeout):
+        body = json.loads(req.data.decode("utf-8"))
+        user = body["messages"][1]["content"]
+        assert user.count(marker) == 1, f"expected single R̄ copy in user message, got {user.count(marker)}"
+        return _Resp(
+            {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"total_tokens": 1},
+            }
+        )
+
+    monkeypatch.setattr("aegean.adapters.openrouter_agent.urlopen", _fake_urlopen)
+    base = {"id": "root", "description": "Original question", "context": {}}
+    task = build_refm_task(
+        base,
+        refinement_set=[marker, {"k": "v"}],
+        term_num=1,
+        round_num=2,
+        agent_id="a1",
+    )
+    agent = OpenRouterAgent(model="openrouter/test-model", api_key="k")
+    out = agent.execute(task)
+    assert out["ok"] is True

@@ -1,0 +1,13 @@
+# Store text files with LF in the repository and check them out as LF.
+# Reduces LF/CRLF churn and warnings on Windows when editors use Unix endings.
+* text=auto eol=lf
+
+# Binaries (do not touch line endings)
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.woff binary
+*.woff2 binary

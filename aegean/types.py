@@ -159,6 +159,10 @@ class AegeanConfig:
     #: Leader election (RequestVote/Vote): max term values to try before abort when stalls persist.
     #: Each failed attempt increments the candidate **term** and retries with the same leader id.
     max_election_attempts: int = 32
+    #: Print a human-readable session trace (summary, events, rounds) after a successful run via
+    #: :func:`~aegean.protocol.run_aegean_session` / :class:`~aegean.protocol.AegeanRunner`.
+    #: Also enabled when env ``AEGEAN_SESSION_TRACE`` is ``1``, ``true``, ``yes``, or ``on``.
+    session_trace: bool = False
 
 
 def max_failstop_faults_allowed(total_agents: int) -> int:

@@ -1,0 +1,11 @@
+{
+  "include": ["aegean", "examples", "tests"],
+  "exclude": ["**/__pycache__", ".venv", "multi_agentic_bft.egg-info"],
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["."]
+    }
+  ],
+  "pythonVersion": "3.10"
+}

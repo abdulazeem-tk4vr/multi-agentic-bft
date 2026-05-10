@@ -196,9 +196,19 @@ class AegeanProtocol:
             self.config.confidence_threshold,
             self.config.max_election_attempts,
         )
-        for expert in experts:
-            if expert not in agents:
-                return {"ok": False, "error": f"Agent not found: {expert}"}
+        expert_set = set(experts)
+        if len(experts) != len(expert_set):
+            return {"ok": False, "error": "experts list must not contain duplicate ids"}
+        agent_ids = set(agents.keys())
+        if expert_set != agent_ids:
+            missing = sorted(expert_set - agent_ids)
+            extra = sorted(agent_ids - expert_set)
+            parts: list[str] = []
+            if missing:
+                parts.append(f"no agent for experts: {missing}")
+            if extra:
+                parts.append(f"agents not listed in experts: {extra}")
+            return {"ok": False, "error": "; ".join(parts)}
         if _is_production_env(config):
             for expert in experts:
                 agent = agents.get(expert)
@@ -340,7 +350,7 @@ class AegeanProtocol:
                 ag = agents.get(eid)
                 if ag is None:
                     return create_timeout_vote(eid, soln_pid), None, 0
-                exec_r = ag.execute(build_soln_task(config["task"], round_num=0))
+                exec_r = ag.execute(build_soln_task(config["task"], round_num=0, agent_id=eid))
                 shape_err = _validate_exec_result_shape(exec_r)
                 if shape_err is not None:
                     _log.warning("invalid execute() result for agent=%s phase=soln: %s", eid, shape_err)
@@ -683,3 +693,109 @@ class AegeanProtocol:
 
 def create_aegean_protocol(config: AegeanConfig | None = None, event_bus: EventBus | None = None) -> AegeanProtocol:
     return AegeanProtocol(config=config, event_bus=event_bus)
+
+
+class AegeanSessionError(RuntimeError):
+    """Raised when :func:`run_aegean_session` cannot return a result (bad config, missing agents, election abort, etc.).
+
+    A normal session that ends **without** consensus (e.g. ``max_rounds``) still returns an
+    :class:`~aegean.types.AegeanResult` with ``consensus_reached=False`` — that is **not** an error.
+    """
+
+
+def run_aegean_session(
+    session_cfg: dict[str, Any],
+    agents: dict[str, Agent],
+    *,
+    config: AegeanConfig | None = None,
+    event_bus: EventBus | None = None,
+) -> AegeanResult:
+    """Run one Aegean session and return :class:`~aegean.types.AegeanResult`.
+
+    This is the usual **“pass agents → get outcome”** entry point. It wraps
+    :func:`create_aegean_protocol` and :meth:`AegeanProtocol.execute` and unwraps ``value``.
+
+    For **multiple sessions** with **`cancel()`** on the same config/bus, use :class:`AegeanRunner`
+    instead. Use :class:`AegeanProtocol` directly if you need the raw ``{"ok": bool, ...}`` dict.
+
+    When :attr:`~aegean.types.AegeanConfig.session_trace` is True or env ``AEGEAN_SESSION_TRACE``
+    is set (``1``, ``true``, ``yes``, ``on``), prints a human-readable trace to stderr after success;
+    see :func:`~aegean.session_trace.print_session_trace`.
+
+    Raises:
+        AegeanSessionError: When ``execute`` returns ``ok=False`` (validation, leader Soln failure, election failed, …).
+    """
+    cfg = config or AegeanConfig()
+    protocol = create_aegean_protocol(config=cfg, event_bus=event_bus)
+    out = protocol.execute(session_cfg, agents)
+    if not out["ok"]:
+        raise AegeanSessionError(out.get("error", str(out)))
+    result: AegeanResult = out["value"]
+    from .session_trace import print_session_trace, session_trace_enabled
+
+    if session_trace_enabled(protocol.config):
+        experts_list = list(session_cfg.get("experts") or [])
+        sid = str(session_cfg.get("session_id", ""))
+        task = session_cfg.get("task")
+        desc: str | None = None
+        if isinstance(task, dict):
+            raw_d = task.get("description")
+            if isinstance(raw_d, str):
+                desc = raw_d
+        print_session_trace(
+            result,
+            config=protocol.config,
+            experts=experts_list,
+            session_id=sid,
+            event_bus=protocol.event_bus,
+            task_description=desc,
+        )
+    return result
+
+
+class AegeanRunner:
+    """Combine **convenient** :meth:`run` (returns :class:`~aegean.types.AegeanResult`, raises on hard errors)
+    with a **stable** :class:`AegeanProtocol` handle for :meth:`cancel` and repeated sessions.
+
+    After :meth:`cancel`, this instance stays cancelled—create a **new** ``AegeanRunner`` for further work.
+    """
+
+    __slots__ = ("_protocol",)
+
+    def __init__(self, config: AegeanConfig | None = None, event_bus: EventBus | None = None) -> None:
+        self._protocol = create_aegean_protocol(config=config, event_bus=event_bus)
+
+    @property
+    def protocol(self) -> AegeanProtocol:
+        return self._protocol
+
+    def cancel(self, reason: str = "") -> None:
+        """Request cooperative cancellation; see :meth:`AegeanProtocol.cancel`."""
+        self._protocol.cancel(reason)
+
+    def run(self, session_cfg: dict[str, Any], agents: dict[str, Agent]) -> AegeanResult:
+        """Run one session on the wrapped protocol (same semantics as :func:`run_aegean_session`)."""
+        out = self._protocol.execute(session_cfg, agents)
+        if not out["ok"]:
+            raise AegeanSessionError(out.get("error", str(out)))
+        result: AegeanResult = out["value"]
+        from .session_trace import print_session_trace, session_trace_enabled
+
+        if session_trace_enabled(self._protocol.config):
+            experts_list = list(session_cfg.get("experts") or [])
+            sid = str(session_cfg.get("session_id", ""))
+            task = session_cfg.get("task")
+            desc: str | None = None
+            if isinstance(task, dict):
+                raw_d = task.get("description")
+                if isinstance(raw_d, str):
+                    desc = raw_d
+            print_session_trace(
+                result,
+                config=self._protocol.config,
+                experts=experts_list,
+                session_id=sid,
+                event_bus=self._protocol.event_bus,
+                task_description=desc,
+            )
+        return result

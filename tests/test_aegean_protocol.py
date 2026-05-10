@@ -1,10 +1,15 @@
+import pytest
+
 from aegean import (
     AegeanConfig,
+    AegeanRunner,
+    AegeanSessionError,
     EventBus,
     calculate_quorum_size,
     create_aegean_protocol,
     has_accept_quorum,
     is_consensus_failed,
+    run_aegean_session,
 )
 from aegean.types import QuorumStatus
 from aegean.task_routing import PHASE_REFM, aegean_task_phase
@@ -55,6 +60,39 @@ def test_validation_min_agents():
     assert result["ok"] is False
 
 
+def test_rejects_duplicate_expert_ids():
+    protocol = create_aegean_protocol()
+    result = protocol.execute(
+        make_config(["a1", "a1", "a2"]),
+        {
+            "a1": MockAgent("p", "ACCEPT"),
+            "a2": MockAgent("p", "ACCEPT"),
+        },
+    )
+    assert result["ok"] is False
+    assert "duplicate" in result["error"].lower()
+
+
+def test_rejects_agents_experts_set_mismatch_extra_agent():
+    protocol = create_aegean_protocol()
+    result = protocol.execute(
+        make_config(["a1", "a2", "a3"]),
+        {f"a{i}": MockAgent("p", "ACCEPT") for i in (1, 2, 3, 4)},
+    )
+    assert result["ok"] is False
+    assert "a4" in result["error"] or "not listed" in result["error"]
+
+
+def test_rejects_agents_experts_set_mismatch_missing_agent():
+    protocol = create_aegean_protocol()
+    result = protocol.execute(
+        make_config(["a1", "a2", "a3"]),
+        {f"a{i}": MockAgent("p", "ACCEPT") for i in (1, 2)},
+    )
+    assert result["ok"] is False
+    assert "a3" in result["error"] or "no agent" in result["error"]
+
+
 def test_rejects_when_request_vote_quorum_not_reached():
     protocol = create_aegean_protocol()
     cfg = make_config(["a1", "a2", "a3"])
@@ -79,6 +117,76 @@ def test_consensus_reached_when_majority_accepts():
     result = protocol.execute(config, agents)
     assert result["ok"] is True
     assert result["value"].consensus_reached is True
+
+
+def test_run_aegean_session_returns_aegean_result():
+    config = make_config(["a1", "a2", "a3"])
+    agents = {
+        "a1": MockAgent("proposal", "ACCEPT"),
+        "a2": MockAgent("proposal", "ACCEPT"),
+        "a3": MockAgent("proposal", "ACCEPT"),
+    }
+    result = run_aegean_session(
+        config,
+        agents,
+        config=AegeanConfig(max_rounds=3, beta=1),
+        event_bus=EventBus(),
+    )
+    assert result.consensus_reached is True
+
+
+def test_run_aegean_session_session_trace_writes_stderr(capsys):
+    config = make_config(["a1", "a2", "a3"])
+    agents = {
+        "a1": MockAgent("proposal", "ACCEPT"),
+        "a2": MockAgent("proposal", "ACCEPT"),
+        "a3": MockAgent("proposal", "ACCEPT"),
+    }
+    run_aegean_session(
+        config,
+        agents,
+        config=AegeanConfig(max_rounds=3, beta=1, session_trace=True),
+        event_bus=EventBus(),
+    )
+    captured = capsys.readouterr()
+    assert "OUTCOME" in captured.err
+    assert "ROUNDS" in captured.err
+
+
+def test_run_aegean_session_raises_on_invalid_config():
+    with pytest.raises(AegeanSessionError):
+        run_aegean_session(
+            make_config(["a1", "a2"]),
+            {"a1": MockAgent("p", "ACCEPT"), "a2": MockAgent("p", "ACCEPT")},
+        )
+
+
+def test_aegean_runner_runs_multiple_sessions():
+    runner = AegeanRunner(config=AegeanConfig(max_rounds=3, beta=1), event_bus=EventBus())
+    agents = {
+        "a1": MockAgent("proposal", "ACCEPT"),
+        "a2": MockAgent("proposal", "ACCEPT"),
+        "a3": MockAgent("proposal", "ACCEPT"),
+    }
+    r1 = runner.run(make_config(["a1", "a2", "a3"]), agents)
+    assert r1.consensus_reached is True
+    cfg2 = dict(make_config(["a1", "a2", "a3"]))
+    cfg2["session_id"] = "second-session"
+    r2 = runner.run(cfg2, agents)
+    assert r2.consensus_reached is True
+
+
+def test_aegean_runner_cancel_sticks():
+    runner = AegeanRunner(config=AegeanConfig(max_rounds=3, beta=1), event_bus=EventBus())
+    runner.cancel("stop")
+    agents = {
+        "a1": MockAgent("proposal", "ACCEPT"),
+        "a2": MockAgent("proposal", "ACCEPT"),
+        "a3": MockAgent("proposal", "ACCEPT"),
+    }
+    r = runner.run(make_config(["a1", "a2", "a3"]), agents)
+    assert r.consensus_reached is False
+    assert r.termination_reason == "error"
 
 
 def test_eventbus_emits_started_and_completed():
