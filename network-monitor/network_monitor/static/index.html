@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Aegean network monitor</title>
+  <style>
+    :root { --bg:#070a10; --panel:#0f1520; --line:#1c2a3d; --text:#c8d4e4; --muted:#5a6d82; --ok:#3ddf8c; --bad:#ff6b6b; --cyan:#2ee6c8; --gold:#f0c85e; --font:"JetBrains Mono","Consolas",monospace; }
+    * { box-sizing: border-box; }
+    html, body { height:100%; margin:0; overflow:hidden; background:var(--bg); color:var(--text); font-family:var(--font); }
+    body { display:flex; flex-direction:column; font-size:12px; }
+    header, footer { flex-shrink:0; border-bottom:1px solid var(--line); padding:10px 14px; color:var(--muted); }
+    footer { border-bottom:0; border-top:1px solid var(--line); font-size:10px; }
+    .layout { flex:1; min-height:0; display:grid; grid-template-columns:minmax(260px,320px) 1fr minmax(260px,320px); overflow:hidden; }
+    .left { min-height:0; overflow:auto; border-right:1px solid var(--line); background:var(--panel); padding:12px; }
+    .center { min-height:0; padding:10px; position:relative; border-right:1px solid var(--line); }
+    .right { min-height:0; display:flex; flex-direction:column; background:var(--panel); }
+    .right h3 { margin:0; padding:10px 12px; font-size:10px; letter-spacing:.08em; color:var(--muted); text-transform:uppercase; border-bottom:1px solid var(--line); }
+    #feed { flex:1; min-height:0; overflow:auto; padding:8px 10px; }
+    #corebox { border-top:1px solid var(--line); padding:10px 12px; }
+    canvas { width:100%; height:100%; display:block; border:1px solid var(--line); border-radius:8px; background:#0b1119; }
+    .hud { position:absolute; left:18px; top:14px; font-size:10px; color:var(--muted); }
+    .row { margin-bottom:10px; }
+    label { display:block; margin-bottom:4px; color:var(--muted); font-size:10px; }
+    input, textarea { width:100%; border:1px solid var(--line); border-radius:4px; background:#0a1018; color:var(--text); font-family:var(--font); padding:6px 8px; }
+    textarea { min-height:72px; resize:vertical; }
+    .inline { display:inline-flex; gap:10px; align-items:center; font-size:11px; color:var(--muted); margin:4px 0; }
+    button { width:100%; margin-top:10px; border:0; border-radius:4px; padding:10px; font-weight:700; background:#197f6c; color:#fff; cursor:pointer; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    #cancel-btn { background:#8a2e2e; margin-top:6px; }
+    #hint { margin-top:8px; font-size:10px; line-height:1.35; color:var(--muted); }
+    .err { color:var(--bad); } .ok { color:var(--ok); }
+    .line { margin:4px 0; font-size:10px; line-height:1.45; word-break:break-word; color:var(--text); }
+    .k { color:var(--cyan); margin-right:6px; }
+    .msg-start { color:#8fb3d9; }
+    .msg-round { color:#f0c85e; }
+    .msg-worker { color:#8cefe0; }
+    .msg-vote { color:#5de3c8; }
+    .msg-quorum-ok { color:#3ddf8c; }
+    .msg-quorum-bad { color:#ff8a8a; }
+    .msg-loop { color:#b7a9ff; }
+    .msg-end-ok, .msg-outcome-ok { color:#3ddf8c; font-weight:700; }
+    .msg-end-bad, .msg-outcome-bad, .msg-error { color:#ff6b6b; font-weight:700; }
+  </style>
+</head>
+<body>
+  <header>Aegean // network map</header>
+  <div class="layout">
+    <div class="left">
+      <div class="row"><label for="session_id">Session id</label><input id="session_id" value="dashboard" /></div>
+      <div class="row"><label for="n_agents">Number of agents (N)</label><input id="n_agents" type="number" min="3" max="32" value="3" /></div>
+      <div class="row"><label for="expert_ids">Expert ids (optional, comma-separated)</label><input id="expert_ids" placeholder="a1,a2,a3" /></div>
+      <div class="row"><label for="task_id">Task id</label><input id="task_id" value="t1" /></div>
+      <div class="row"><label for="task_description">Task / prompt</label><textarea id="task_description">Pick a short one-word codename.</textarea></div>
+      <div class="row"><label for="openrouter_base_port">OpenRouter local base port</label><input id="openrouter_base_port" type="number" min="1024" max="65500" value="18700" /></div>
+      <div class="row"><label for="max_rounds">max_rounds</label><input id="max_rounds" type="number" min="0" max="99" value="5" /></div>
+      <div class="row"><label for="alpha">alpha</label><input id="alpha" type="number" min="1" max="32" value="2" /></div>
+      <div class="row"><label for="beta">beta</label><input id="beta" type="number" min="1" max="32" value="2" /></div>
+      <div class="row"><label for="byzantine_tolerance">byzantine_tolerance</label><input id="byzantine_tolerance" type="number" min="0" max="16" value="0" /></div>
+      <div class="row"><label for="confidence_threshold">confidence_threshold</label><input id="confidence_threshold" value="0.7" /></div>
+      <div class="row"><label for="round_timeout_ms">round_timeout_ms</label><input id="round_timeout_ms" type="number" min="1000" value="60000" /></div>
+      <div class="row"><label for="max_election_attempts">max_election_attempts</label><input id="max_election_attempts" type="number" min="1" value="32" /></div>
+      <label class="inline"><input id="session_trace" type="checkbox" /> session_trace</label>
+      <button id="run-btn">Run Aegean session</button>
+      <button id="cancel-btn" disabled>Cancel run</button>
+      <div id="hint">Loading capabilities…</div>
+    </div>
+    <div class="center">
+      <div class="hud" id="hud">—</div>
+      <canvas id="net"></canvas>
+    </div>
+    <div class="right">
+      <h3>Event log</h3>
+      <div id="feed"></div>
+      <div id="corebox">
+        <h3 style="padding:0;border:0;margin:0 0 6px">Final outcome</h3>
+        <div id="core" class="line">No run yet.</div>
+      </div>
+    </div>
+  </div>
+  <footer>POST /api/run · GET /api/state</footer>
+  <script>
+  (function () {
+    const runBtn = document.getElementById("run-btn");
+    const hint = document.getElementById("hint");
+    const cancelBtn = document.getElementById("cancel-btn");
+    const feed = document.getElementById("feed");
+    const core = document.getElementById("core");
+    const hud = document.getElementById("hud");
+    const canvas = document.getElementById("net");
+    const ctx = canvas.getContext("2d");
+    let openrouterOk = false;
+    let lastSeq = -1;
+    let lastState = null;
+    let viewW = 0;
+    let viewH = 0;
+
+    function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+    function v(id) { return document.getElementById(id).value; }
+    function c(id) { return document.getElementById(id).checked; }
+    function asId(x) {
+      const s = (x == null ? "" : String(x)).trim();
+      if (!s || s === "undefined" || s === "null") return "";
+      return s;
+    }
+    function displayExperts(s) {
+      const fromExperts = Array.isArray(s.experts) ? s.experts.map(asId).filter(Boolean) : [];
+      const fromAgents = Object.keys(s.agents || {}).map(asId).filter(Boolean);
+      const dedup = [];
+      const seen = new Set();
+      const src = fromExperts.length ? fromExperts : fromAgents;
+      for (let i = 0; i < src.length; i++) {
+        const id = src[i];
+        if (!seen.has(id)) {
+          seen.add(id);
+          dedup.push(id);
+        }
+      }
+      if (dedup.length) return dedup;
+      const n = Math.max(1, Number(s.quorum_r) || 3);
+      const out = [];
+      for (let i = 1; i <= n; i++) out.push("a" + i);
+      return out;
+    }
+    function eventMsgClass(e) {
+      const kind = String((e && e.kind) || "").toLowerCase();
+      const msg = String((e && e.msg) || "").toLowerCase();
+      if (kind === "start") return "msg-start";
+      if (kind === "round") return "msg-round";
+      if (kind === "worker") return msg.indexOf("ok=true") >= 0 ? "msg-worker" : "msg-error";
+      if (kind === "vote") return "msg-vote";
+      if (kind === "quorum") return msg.indexOf("ok") >= 0 ? "msg-quorum-ok" : "msg-quorum-bad";
+      if (kind === "loop") return "msg-loop";
+      if (kind === "end") return msg.indexOf("ok=true") >= 0 ? "msg-end-ok" : "msg-end-bad";
+      if (kind === "outcome") return msg.indexOf("consensus=true") >= 0 ? "msg-outcome-ok" : "msg-outcome-bad";
+      if (kind.indexOf("error") >= 0) return "msg-error";
+      return "";
+    }
+    function spec() {
+      return {
+        session_id: v("session_id").trim() || "dashboard",
+        n_agents: parseInt(v("n_agents"), 10) || 3,
+        expert_ids: v("expert_ids").trim(),
+        task_id: v("task_id").trim() || "t1",
+        task_description: v("task_description").trim(),
+        openrouter_base_port: parseInt(v("openrouter_base_port"), 10) || 18700,
+        max_rounds: parseInt(v("max_rounds"), 10),
+        alpha: parseInt(v("alpha"), 10),
+        beta: parseInt(v("beta"), 10),
+        byzantine_tolerance: parseInt(v("byzantine_tolerance"), 10),
+        confidence_threshold: parseFloat(v("confidence_threshold")),
+        round_timeout_ms: parseInt(v("round_timeout_ms"), 10),
+        max_election_attempts: parseInt(v("max_election_attempts"), 10),
+        session_trace: c("session_trace")
+      };
+    }
+
+    async function loadCaps() {
+      try {
+        const r = await fetch("/api/capabilities");
+        const j = await r.json();
+        openrouterOk = !!j.openrouter;
+        if (!openrouterOk) {
+          hint.className = "err";
+          hint.textContent = "Set OPENROUTER_API_KEY in .env and refresh.";
+          runBtn.disabled = true;
+        } else {
+          hint.className = "ok";
+          hint.textContent = "Ready. Model: " + (j.model_default || "openai/gpt-4o-mini");
+        }
+      } catch (_e) {
+        hint.className = "err";
+        hint.textContent = "Could not load /api/capabilities";
+      }
+    }
+
+    runBtn.onclick = async function () {
+      hint.className = "";
+      hint.textContent = "Starting…";
+      try {
+        const r = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec()) });
+        const j = await r.json();
+        if (!j.ok) { hint.className = "err"; hint.textContent = j.error || "request failed"; return; }
+        hint.className = "ok"; hint.textContent = "Run started.";
+      } catch (e) {
+        hint.className = "err"; hint.textContent = String(e);
+      }
+    };
+
+    cancelBtn.onclick = async function () {
+      try {
+        const r = await fetch("/api/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        const j = await r.json();
+        if (!j.ok) {
+          hint.className = "err";
+          hint.textContent = j.error || "cancel failed";
+          return;
+        }
+        hint.className = "err";
+        hint.textContent = "Cancelling run…";
+      } catch (e) {
+        hint.className = "err";
+        hint.textContent = String(e);
+      }
+    };
+
+    function drawEventPings(s, experts, cx, cy, r, nowSec) {
+      const events = s.traffic || [];
+      const n = Math.max(1, experts.length);
+      for (let i = 0; i < events.length; i++) {
+        const ev = events[i];
+        const age = nowSec - Number(ev.t || 0);
+        if (age < 0 || age > 2.2) continue;
+        if (ev.kind === "vote" || ev.kind === "worker") {
+          const idx = experts.indexOf(ev.agent);
+          if (idx < 0) continue;
+          const a = (idx / n) * Math.PI * 2 - Math.PI / 2;
+          const sx = cx + Math.cos(a) * r;
+          const sy = cy + Math.sin(a) * r;
+          const dur = ev.kind === "worker" ? 0.78 : 0.62;
+          let u = Math.min(1, age / dur);
+          u = 1 - Math.pow(1 - u, 2);
+          const px = sx + (cx - sx) * u;
+          const py = sy + (cy - sy) * u;
+          const fade = age < dur ? 1 : Math.max(0, 1 - (age - dur) / 1.2);
+          const base = ev.kind === "worker" ? "240,200,94" : "46,230,200";
+          ctx.strokeStyle = "rgba(" + base + "," + (0.38 * fade) + ")";
+          ctx.lineWidth = ev.kind === "worker" ? 4 : 3;
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(px, py);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(px, py, ev.kind === "worker" ? 6 : 5, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(" + base + "," + (0.95 * fade) + ")";
+          ctx.fill();
+          ctx.strokeStyle = "rgba(255,255,255," + (0.55 * fade) + ")";
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        } else if (ev.kind === "quorum") {
+          if (age > 1.35) continue;
+          const ok = ev.ok !== false;
+          const ringR = 48 + age * 100;
+          const alpha = Math.max(0, 0.7 - age * 0.5);
+          ctx.beginPath();
+          ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
+          ctx.strokeStyle = ok ? "rgba(61,223,140," + alpha + ")" : "rgba(255,107,107," + alpha + ")";
+          ctx.lineWidth = 3;
+          ctx.stroke();
+        } else if (ev.kind === "round" && ev.leader) {
+          if (age > 1.0) continue;
+          const idx = experts.indexOf(ev.leader);
+          if (idx < 0) continue;
+          const a = (idx / n) * Math.PI * 2 - Math.PI / 2;
+          const x = cx + Math.cos(a) * r;
+          const y = cy + Math.sin(a) * r;
+          const rr = 34 + age * 54;
+          const alpha = Math.max(0, 0.5 - age * 0.35);
+          ctx.beginPath();
+          ctx.arc(x, y, rr, 0, Math.PI * 2);
+          ctx.strokeStyle = "rgba(240,200,94," + alpha + ")";
+          ctx.lineWidth = 2.5;
+          ctx.stroke();
+        }
+      }
+    }
+
+    function latestAgentSends(s, experts) {
+      const out = {};
+      const rows = s.traffic || [];
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const ev = rows[i];
+        if (!ev || !ev.agent) continue;
+        if (out[ev.agent]) continue;
+        if (ev.kind === "vote") {
+          out[ev.agent] = "vote #" + ev.vote_index + "/" + ev.required;
+        } else if (ev.kind === "worker") {
+          out[ev.agent] = (ev.phase || "?") + " r" + ev.round + (ev.ok ? " ok" : " err");
+        }
+      }
+      for (let j = 0; j < experts.length; j++) {
+        const id = experts[j];
+        if (!out[id]) {
+          const ag = (s.agents || {})[id] || {};
+          const ph = ag.last_phase || "idle";
+          out[id] = ph + (ag.last_round ? " r" + ag.last_round : "");
+        }
+      }
+      return out;
+    }
+
+    function clamp(n, lo, hi) {
+      return Math.max(lo, Math.min(hi, n));
+    }
+
+    function drawAgentOutbox(x, y, text, angle, boundsW, boundsH) {
+      const msg = String(text || "idle");
+      ctx.font = "10px JetBrains Mono, Consolas, monospace";
+      const tw = Math.min(180, Math.max(78, ctx.measureText(msg).width + 16));
+      const th = 22;
+      const ux = Math.cos(angle);
+      const uy = Math.sin(angle);
+      // Push labels outward from each agent so center stays readable.
+      // Add tangential shift to reduce card overlap at top/bottom nodes.
+      const tx = -uy;
+      const ty = ux;
+      const radial = 72 + Math.abs(uy) * 10;
+      const tangent = Math.abs(uy) > 0.75 ? (ux >= 0 ? 28 : -28) : 0;
+      const cx0 = x + ux * radial + tx * tangent;
+      const cy0 = y + uy * 40 + ty * tangent * 0.28;
+      const cx = clamp(cx0, tw * 0.5 + 8, boundsW - tw * 0.5 - 8);
+      const cy = clamp(cy0, th * 0.5 + 8, boundsH - th * 0.5 - 8);
+      const bx = cx - tw * 0.5;
+      const by = cy - th * 0.5;
+      const ex = cx - ux * (tw * 0.5);
+      const ey = cy - uy * (th * 0.5);
+      ctx.strokeStyle = "rgba(46,230,200,0.35)";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+      ctx.fillStyle = "rgba(8,17,27,0.92)";
+      ctx.strokeStyle = "rgba(46,230,200,0.45)";
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(bx, by, tw, th, 6);
+      else ctx.rect(bx, by, tw, th);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#8cefe0";
+      ctx.textAlign = "center";
+      ctx.fillText(msg.slice(0, 26), cx, by + 14);
+    }
+
+    function draw(s) {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.max(280, Math.floor(rect.width));
+      const h = Math.max(260, Math.floor(rect.height));
+      viewW = w;
+      viewH = h;
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      const nowSec = Date.now() / 1000;
+      const experts = displayExperts(s);
+      const n = Math.max(1, experts.length);
+      const cx = w * 0.5, cy = h * 0.52, r = Math.min(w, h) * 0.30;
+      const sends = latestAgentSends(s, experts);
+      const leaderId = asId(s.leader_id);
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2 - Math.PI / 2;
+        const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+        ctx.strokeStyle = "rgba(46,230,200,.18)";
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(x, y); ctx.stroke();
+        ctx.fillStyle = "#0f1f30"; ctx.strokeStyle = experts[i] === leaderId ? "#f0c85e" : "#2a4b66"; ctx.lineWidth = 2;
+        ctx.beginPath(); if (ctx.roundRect) { ctx.roundRect(x - 46, y - 30, 92, 60, 8); } else { ctx.rect(x - 46, y - 30, 92, 60); }
+        ctx.fill(); ctx.stroke();
+        ctx.fillStyle = experts[i] === leaderId ? "#f0c85e" : "#7dffe8";
+        ctx.font = "bold 12px JetBrains Mono, Consolas, monospace"; ctx.textAlign = "center"; ctx.fillText(experts[i], x, y - 6);
+        drawAgentOutbox(x, y + 16, sends[experts[i]], a, w, h);
+      }
+      ctx.beginPath(); ctx.arc(cx, cy, 48, 0, Math.PI * 2); ctx.fillStyle = "#123"; ctx.fill(); ctx.strokeStyle = "#2ee6c8"; ctx.stroke();
+      const qp = s.quorum_progress || [0, s.quorum_r || 0];
+      ctx.fillStyle = "#a8c7d8"; ctx.font = "bold 11px JetBrains Mono, Consolas, monospace"; ctx.textAlign = "center";
+      ctx.fillText("QUORUM HUB", cx, cy - 6); ctx.fillText(qp[0] + " / " + qp[1], cx, cy + 10);
+      drawEventPings(s, experts, cx, cy, r, nowSec);
+    }
+
+    function renderCore(s) {
+      if (s.run_status === "error") { core.textContent = s.run_error || "error"; core.style.color = "#ff6b6b"; return; }
+      if (s.consensus_reached === true) { core.textContent = String(s.consensus_value); core.style.color = "#3ddf8c"; return; }
+      if (s.consensus_reached === false) {
+        if (s.termination_reason === "max_rounds") {
+          core.innerHTML = 'Stopped: max_rounds — no committed consensus value.<br><span style="color:#7a92a8;font-size:10px">A round can meet vote quorum without decision commit.</span>';
+        } else {
+          core.textContent = String(s.termination_reason || "no consensus");
+        }
+        core.style.color = "#ff6b6b";
+        return;
+      }
+      core.textContent = s.run_status === "running" ? "Running…" : "No run yet.";
+      core.style.color = "#7a92a8";
+    }
+
+    async function poll() {
+      try {
+        const r = await fetch("/api/state", { cache: "no-store" });
+        const s = await r.json();
+        lastState = s;
+        const running = s.run_status === "running";
+        runBtn.disabled = !openrouterOk || running;
+        cancelBtn.disabled = !running;
+        hud.textContent = "seq " + s.seq + " · session " + (s.session_id || "—");
+        if (s.seq !== lastSeq) {
+          lastSeq = s.seq;
+          feed.innerHTML = (s.event_log || []).slice(-70).map(function (e) {
+            const cls = eventMsgClass(e);
+            return '<div class="line"><span class="k">' + esc(e.kind) + "</span><span class=\"" + cls + "\">" + esc(e.msg) + "</span></div>";
+          }).join("");
+          feed.scrollTop = feed.scrollHeight;
+          renderCore(s);
+        }
+        draw(s);
+      } catch (_e) {
+        hud.textContent = "poll error";
+      }
+      setTimeout(poll, 250);
+    }
+
+    if (!CanvasRenderingContext2D.prototype.roundRect) {
+      CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) { this.moveTo(x + r, y); this.arcTo(x + w, y, x + w, y + h, r); this.arcTo(x + w, y + h, x, y + h, r); this.arcTo(x, y + h, x, y, r); this.arcTo(x, y, x + w, y, r); };
+    }
+
+    function tick() {
+      if (lastState) draw(lastState);
+      requestAnimationFrame(tick);
+    }
+
+    loadCaps();
+    poll();
+    requestAnimationFrame(tick);
+  })();
+  </script>
+</body>
+</html>

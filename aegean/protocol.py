@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import asdict
 from typing import Any, Callable, Protocol
@@ -131,11 +132,26 @@ def _join_expert_futures(
     *,
     timeout_ms: int,
     timeout_row: Callable[[str], tuple[AgentVote, Any | None, int]],
-) -> tuple[list[tuple[AgentVote, Any | None, int]], bool]:
-    """Wait (wall-clock) up to ``timeout_ms`` for all futures; canceled stragglers use ``timeout_row``."""
+    is_cancelled: Callable[[], bool] | None = None,
+) -> tuple[list[tuple[AgentVote, Any | None, int]], bool, bool]:
+    """Wait up to ``timeout_ms`` for all futures; supports cooperative cancellation."""
     timeout_s = max(int(timeout_ms), 1) / 1000.0
     fut_set = set(futures.values())
-    done, not_done = wait(fut_set, timeout=timeout_s)
+    done: set[Future] = set()
+    not_done: set[Future] = set(fut_set)
+    deadline = time.monotonic() + timeout_s
+    cancelled = False
+    while not_done:
+        if is_cancelled is not None and is_cancelled():
+            cancelled = True
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        wait_slice = min(0.1, remaining)
+        newly_done, still_waiting = wait(not_done, timeout=wait_slice)
+        done.update(newly_done)
+        not_done = still_waiting
     wall_timed_out = bool(not_done)
     for fut in not_done:
         fut.cancel()
@@ -149,7 +165,7 @@ def _join_expert_futures(
             rows.append(fut.result())
         except Exception:
             rows.append(timeout_row(eid))
-    return rows, wall_timed_out
+    return rows, wall_timed_out, cancelled
 
 
 class AegeanProtocol:
@@ -345,17 +361,30 @@ class AegeanProtocol:
                 self.event_bus, 0, self.config.max_rounds, leader_id, config["session_id"]
             )
             soln_pid = f"soln-{config['session_id']}-0"
+            soln_fail_reasons: dict[str, str] = {}
+
+            def _reason_text(raw: Any, *, max_len: int = 240) -> str:
+                text = str(raw).replace("\r", " ").replace("\n", " ").strip() or "unknown"
+                return text if len(text) <= max_len else f"{text[: max_len - 3]}..."
+
+            def _record_soln_failure(eid: str, reason: str) -> None:
+                msg = _reason_text(reason)
+                soln_fail_reasons[eid] = msg
+                _log.warning("soln generation failed for agent=%s: %s", eid, msg)
 
             def _collect_soln(eid: str) -> tuple[AgentVote, Any | None, int]:
                 ag = agents.get(eid)
                 if ag is None:
+                    _record_soln_failure(eid, "agent missing from endpoint mapping")
                     return create_timeout_vote(eid, soln_pid), None, 0
                 exec_r = ag.execute(build_soln_task(config["task"], round_num=0, agent_id=eid))
                 shape_err = _validate_exec_result_shape(exec_r)
                 if shape_err is not None:
                     _log.warning("invalid execute() result for agent=%s phase=soln: %s", eid, shape_err)
+                    _record_soln_failure(eid, f"invalid execute() result shape: {shape_err}")
                     return create_timeout_vote(eid, soln_pid), None, 0
                 if not exec_r.get("ok", False):
+                    _record_soln_failure(eid, f"execute returned error: {exec_r.get('error', 'unknown')}")
                     return create_timeout_vote(eid, soln_pid), None, 0
                 return _vote_from_ok_exec(
                     eid, soln_pid, exec_r, self.config.confidence_threshold
@@ -363,12 +392,17 @@ class AegeanProtocol:
 
             with ThreadPoolExecutor(max_workers=max(4, n)) as pool:
                 soln_futs = {e: pool.submit(_collect_soln, e) for e in experts}
-                soln_rows, soln_wall_to = _join_expert_futures(
+                soln_rows, soln_wall_to, soln_cancelled = _join_expert_futures(
                     experts,
                     soln_futs,
                     timeout_ms=self.config.round_timeout_ms,
                     timeout_row=lambda eid: (create_timeout_vote(eid, soln_pid), None, 0),
+                    is_cancelled=lambda: self.cancelled,
                 )
+            if soln_cancelled:
+                res = self._final_result(start, rounds, "error", None, total_tokens, None)
+                self._emit_done(res, config["session_id"])
+                return {"ok": True, "value": res}
             if soln_wall_to:
                 any_wall_timeout = True
 
@@ -391,7 +425,12 @@ class AegeanProtocol:
             total_tokens += t0
             li = experts.index(leader_id)
             if soln_votes[li].status != "accept":
-                return {"ok": False, "error": "Leader soln generation failed"}
+                leader_reason = soln_fail_reasons.get(
+                    leader_id, f"leader vote status={soln_votes[li].status}"
+                )
+                err = f"Leader soln generation failed: {leader_reason}"
+                _log.warning(err)
+                return {"ok": False, "error": err}
 
             q0 = evaluate_quorum_status(
                 EvaluateQuorumOptions(votes=soln_votes, total_agents=n, byzantine_tolerance=f)
@@ -485,12 +524,16 @@ class AegeanProtocol:
 
             with ThreadPoolExecutor(max_workers=max(4, n)) as pool:
                 ref_futs = {e: pool.submit(_collect_refm, e) for e in experts}
-                ref_rows, ref_wall_to = _join_expert_futures(
+                ref_rows, ref_wall_to, ref_cancelled = _join_expert_futures(
                     experts,
                     ref_futs,
                     timeout_ms=self.config.round_timeout_ms,
                     timeout_row=lambda eid: (create_timeout_vote(eid, ref_pid), None, 0),
+                    is_cancelled=lambda: self.cancelled,
                 )
+            if ref_cancelled:
+                reason = "error"
+                break
             if ref_wall_to:
                 any_wall_timeout = True
 
