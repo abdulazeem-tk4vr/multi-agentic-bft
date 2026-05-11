@@ -186,7 +186,7 @@ def test_aegean_runner_cancel_sticks():
     }
     r = runner.run(make_config(["a1", "a2", "a3"]), agents)
     assert r.consensus_reached is False
-    assert r.termination_reason == "error"
+    assert r.termination_reason == "cancelled"
 
 
 def test_eventbus_emits_started_and_completed():

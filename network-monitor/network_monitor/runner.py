@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import socketserver
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -13,6 +14,63 @@ from typing import Any, Callable
 from aegean import AegeanConfig, AegeanRunner, http_agents_from_endpoints
 from aegean.adapters import OpenRouterAgent
 from aegean.types import calculate_quorum_size, validate_failstop_fault_bound
+
+from .tcp_session import read_frame, write_frame
+from .transport import ExecuteContext, SessionAgentTransport, TcpSessionTransport
+
+
+class AgentRecoveryStore:
+    """Thread-safe per-agent RefmSet snapshot store for NewTermAck provider."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._by_agent: dict[str, tuple[int, int, list[Any]]] = {}
+
+    def observe_task(self, task_d: dict[str, Any]) -> None:
+        bag = (task_d.get("context") or {}).get("aegean") or {}
+        if str(bag.get("phase", "")).strip().lower() != "refm":
+            return
+        agent_id = str(bag.get("agent_id", "")).strip()
+        if not agent_id:
+            return
+        raw_refm = bag.get("refinement_set")
+        if not isinstance(raw_refm, list):
+            return
+        try:
+            term_num = int(bag.get("term_num", 0))
+            round_num = int(bag.get("round_num", 0))
+        except (TypeError, ValueError):
+            return
+        snap = list(raw_refm)
+        with self._lock:
+            cur = self._by_agent.get(agent_id)
+            if cur is None or (term_num, round_num) >= (cur[0], cur[1]):
+                self._by_agent[agent_id] = (term_num, round_num, snap)
+
+    def ack_rows(self, experts: list[str], term_num: int) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        with self._lock:
+            for eid in experts:
+                cur = self._by_agent.get(eid)
+                if cur is None:
+                    rows.append(
+                        {
+                            "term": int(term_num),
+                            "agent_id": eid,
+                            "round_num": 0,
+                            "refm_bottom": True,
+                        }
+                    )
+                    continue
+                rows.append(
+                    {
+                        "term": int(cur[0]),
+                        "agent_id": eid,
+                        "round_num": int(cur[1]),
+                        "refm_set": list(cur[2]),
+                    }
+                )
+        return rows
 
 
 def load_dotenv(repo_root: Path) -> None:
@@ -61,7 +119,7 @@ def _trace_worker(viz: Any, task: dict[str, Any], result: dict[str, Any]) -> Non
     viz.worker_trace(agent_id=agent, phase=phase, round_num=rnum, preview=prev, tokens=tok, ok=bool(result.get("ok")))
 
 
-def _parse_spec(data: dict[str, Any]) -> tuple[list[str], dict[str, Any], AegeanConfig, int]:
+def _parse_spec(data: dict[str, Any]) -> tuple[list[str], dict[str, Any], AegeanConfig, int, str]:
     n = int(data.get("n_agents", 3))
     if n < 3 or n > 32:
         raise ValueError("n_agents must be between 3 and 32")
@@ -107,7 +165,10 @@ def _parse_spec(data: dict[str, Any]) -> tuple[list[str], dict[str, Any], Aegean
     base_port = int(data.get("openrouter_base_port", 18_700))
     if base_port < 1024 or base_port > 65500:
         raise ValueError("openrouter_base_port out of range")
-    return experts, task, cfg, base_port
+    transport = str(data.get("transport", "http")).strip().lower() or "http"
+    if transport not in {"http", "tcp"}:
+        raise ValueError("transport must be 'http' or 'tcp'")
+    return experts, task, cfg, base_port, transport
 
 
 def validate_spec_for_submit(spec: dict[str, Any], repo_root: Path) -> str | None:
@@ -133,13 +194,22 @@ def run_dashboard_session(
     import os
 
     load_dotenv(repo_root)
-    experts, task, aegean_cfg, base_port = _parse_spec(spec)
+    experts, task, aegean_cfg, base_port, transport = _parse_spec(spec)
     session_id = (spec.get("session_id") or "dashboard").strip() or "dashboard"
     quorum_r = calculate_quorum_size(len(experts), aegean_cfg.byzantine_tolerance)
     viz.configure(experts=experts, session_id=session_id, quorum_r=quorum_r)
     if not os.getenv("OPENROUTER_API_KEY", "").strip():
         raise ValueError("OPENROUTER_API_KEY not set (add to .env or environment)")
-    _run_openrouter(viz, experts, session_id, task, aegean_cfg, base_port, on_cancel_ready=on_cancel_ready)
+    _run_openrouter(
+        viz,
+        experts,
+        session_id,
+        task,
+        aegean_cfg,
+        base_port,
+        transport=transport,
+        on_cancel_ready=on_cancel_ready,
+    )
 
 
 def _run_openrouter(
@@ -150,6 +220,7 @@ def _run_openrouter(
     aegean_cfg: AegeanConfig,
     base_port: int,
     *,
+    transport: str,
     on_cancel_ready: Callable[[Callable[[], None]], None] | None = None,
 ) -> None:
     import os
@@ -164,9 +235,16 @@ def _run_openrouter(
     ctx = Ctx()
     ctx.viz = viz
     ctx.llm = llm
+    recovery_store = AgentRecoveryStore()
 
     def execute(task_d: dict[str, Any]) -> dict[str, Any]:
         return ctx.llm.execute(task_d)
+
+    def execute_traced(task_d: dict[str, Any]) -> dict[str, Any]:
+        recovery_store.observe_task(task_d)
+        out = execute(task_d)
+        _trace_worker(ctx.viz, task_d, out)
+        return out
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: object) -> None:
@@ -187,8 +265,7 @@ def _run_openrouter(
             if not isinstance(t, dict):
                 out: dict[str, Any] = {"ok": False, "error": "bad task"}
             else:
-                out = execute(t)
-                _trace_worker(ctx.viz, t, out)
+                out = execute_traced(t)
             b = json.dumps(out).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -196,8 +273,47 @@ def _run_openrouter(
             self.end_headers()
             self.wfile.write(b)
 
+    class TcpHandler(socketserver.StreamRequestHandler):
+        def handle(self) -> None:
+            while True:
+                try:
+                    req = read_frame(self.rfile)
+                except EOFError:
+                    return
+                except Exception:
+                    return
+                msg_id = str(req.get("msg_id", ""))
+                payload = req.get("payload")
+                if not isinstance(payload, dict):
+                    resp_payload: dict[str, Any] = {"ok": False, "error": "bad payload"}
+                else:
+                    task_obj = payload.get("task")
+                    if not isinstance(task_obj, dict):
+                        resp_payload = {"ok": False, "error": "bad task"}
+                    else:
+                        resp_payload = execute_traced(task_obj)
+                resp = {
+                    "session_id": req.get("session_id", session_id),
+                    "msg_id": msg_id,
+                    "type": "execute.result",
+                    "agent_id": req.get("agent_id", ""),
+                    "term": req.get("term", 0),
+                    "round": req.get("round", 0),
+                    "payload": resp_payload,
+                }
+                try:
+                    write_frame(self.wfile, resp)
+                except Exception:
+                    return
+
+    class ThreadedTcpServer(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+
     servers: list[HTTPServer] = []
     threads: list[threading.Thread] = []
+    tcp_servers: list[ThreadedTcpServer] = []
+    tcp_threads: list[threading.Thread] = []
+    tcp_clients: list[TcpSessionTransport] = []
     for i, _eid in enumerate(experts):
         port = base_port + i
         httpd = HTTPServer(("127.0.0.1", port), Handler)
@@ -205,10 +321,62 @@ def _run_openrouter(
         th = threading.Thread(target=httpd.serve_forever, daemon=True)
         threads.append(th)
         th.start()
+        tcpd = ThreadedTcpServer(("127.0.0.1", port + 1000), TcpHandler)
+        tcp_servers.append(tcpd)
+        tth = threading.Thread(target=tcpd.serve_forever, daemon=True)
+        tcp_threads.append(tth)
+        tth.start()
     time.sleep(0.2)
 
     endpoints = {eid: f"127.0.0.1:{base_port + i}" for i, eid in enumerate(experts)}
-    agents = http_agents_from_endpoints(endpoints, execute_path="/execute", timeout_s=120.0)
+    if transport == "http":
+        agents = http_agents_from_endpoints(endpoints, execute_path="/execute", timeout_s=120.0)
+    else:
+        class _TcpAgent:
+            def __init__(self, eid: str, client: SessionAgentTransport) -> None:
+                self._eid = eid
+                self._client = client
+
+            def execute(self, task_d: dict[str, Any]) -> dict[str, Any]:
+                bag = (task_d.get("context") or {}).get("aegean") or {}
+                phase = str(bag.get("phase", "?"))
+                round_num = int(bag.get("round_num", 0))
+                term_num = int(bag.get("term_num", 0))
+                try:
+                    return self._client.execute(
+                        task_d,
+                        ctx=ExecuteContext(
+                            session_id=session_id,
+                            phase=phase,
+                            round_num=round_num,
+                            term_num=term_num,
+                            agent_id=self._eid,
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    viz.bus.emit(
+                        "transport.error",
+                        {
+                            "transport": "tcp",
+                            "agent_id": self._eid,
+                            "phase": phase,
+                            "round": round_num,
+                            "error": str(exc),
+                        },
+                        session_id=session_id,
+                    )
+                    return {"ok": False, "error": f"tcp transport error: {exc}"}
+
+        agents = {}
+        for i, eid in enumerate(experts):
+            client = TcpSessionTransport("127.0.0.1", base_port + i + 1000, session_id=session_id, agent_id=eid)
+            tcp_clients.append(client)
+            agents[eid] = _TcpAgent(eid, client)
+    viz.bus.emit(
+        "transport.started",
+        {"transport": transport, "worker_count": len(experts)},
+        session_id=session_id,
+    )
     runner = AegeanRunner(config=aegean_cfg, event_bus=viz.bus)
     cancelled = threading.Event()
 
@@ -217,22 +385,52 @@ def _run_openrouter(
             return
         cancelled.set()
         runner.cancel("cancelled by dashboard user")
+        for client in tcp_clients:
+            try:
+                client.close()
+            except Exception:
+                pass
         for httpd in servers:
             try:
                 httpd.shutdown()
+            except Exception:
+                pass
+        for tcpd in tcp_servers:
+            try:
+                tcpd.shutdown()
             except Exception:
                 pass
 
     if on_cancel_ready is not None:
         on_cancel_ready(cancel_run)
     try:
+        def _new_term_ack_provider(experts_in: list[str], term_num: int, _leader_id: str) -> list[dict[str, Any]]:
+            return recovery_store.ack_rows(experts_in, term_num)
+
         result = runner.run(
-            {"session_id": session_id, "pattern": "aegean", "experts": experts, "task": task},
+            {
+                "session_id": session_id,
+                "pattern": "aegean",
+                "experts": experts,
+                "task": task,
+                "new_term_ack_provider": _new_term_ack_provider,
+            },
             agents,
         )
         viz.finalize(result)
     finally:
+        for client in tcp_clients:
+            client.close()
         for httpd in servers:
             httpd.shutdown()
+        for tcpd in tcp_servers:
+            tcpd.shutdown()
         for th in threads:
             th.join(timeout=5.0)
+        for tth in tcp_threads:
+            tth.join(timeout=5.0)
+        viz.bus.emit(
+            "transport.stopped",
+            {"transport": transport, "cancelled": cancelled.is_set()},
+            session_id=session_id,
+        )

@@ -1,6 +1,6 @@
 # Context bundles: SOC L1 automation × Aegean consensus
 
-**Location:** `docs/context-bundles/soc-l1-aegean/`  
+**Location:** `docs/soc-l1-aegean/`  
 **Code reference:** `code-projects/multi-agentic-bft/` (`AegeanProtocol`, `DecisionEngine`, `task_routing`)
 
 ## Reading order

@@ -40,3 +40,19 @@ def test_election_exhausts_attempts_without_quorum():
     assert r["ok"] is False
     assert "election" in r["error"].lower() or "term" in r["error"].lower()
     assert "4" in r["error"] or "attempt" in r["error"].lower()
+
+
+def test_election_rotates_candidate_deterministically_on_retries():
+    bus = EventBus()
+    protocol = create_aegean_protocol(
+        config=AegeanConfig(max_rounds=2, beta=1, alpha=2, max_election_attempts=4),
+        event_bus=bus,
+    )
+    cfg = create_test_config(["a1", "a2", "a3"])
+    cfg["election_initial_terms"] = {"a1": 100, "a2": 100, "a3": 100}
+    agents = {e: MockAgent(e, proposal_output="x", refm_output="x") for e in ("a1", "a2", "a3")}
+    r = protocol.execute(cfg, agents)
+    assert r["ok"] is False
+    sent = [e for e in bus.emitted_events if e["topic"] == "protocol.aegean.request_vote_sent"]
+    cands = [str(e["payload"].get("candidateId")) for e in sent]
+    assert cands[:3] == ["a1", "a2", "a3"]

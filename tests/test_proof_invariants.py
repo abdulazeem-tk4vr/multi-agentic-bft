@@ -126,15 +126,14 @@ def test_certificate_supporting_agents_subset_and_quorum_size():
 
 
 def test_recovery_leader_id_on_certificate():
-    """After NewTerm recovery, certificate leader matches configured recovery leader."""
+    """After NewTerm recovery, certificate uses recovered term and reaches consensus."""
     cfg = create_test_config(["a1", "a2", "a3"])
-    cfg["recovery"] = {
-        "leader_id": "a2",
-        "acks": [
+    cfg["new_term_ack_provider"] = (
+        lambda experts, term_num, leader_id: [
             {"term": 9, "agent_id": "a1", "refm_set": ["u", "u", "u"], "round_num": 1},
             {"term": 9, "agent_id": "a2", "refm_set": ["u", "u", "u"], "round_num": 1},
-        ],
-    }
+        ]
+    )
     protocol = create_aegean_protocol(
         config=AegeanConfig(max_rounds=3, beta=1, alpha=2, early_termination=True),
         event_bus=EventBus(),
@@ -147,5 +146,4 @@ def test_recovery_leader_id_on_certificate():
     assert r["ok"] and r["value"].consensus_reached
     cert = r["value"].commit_certificate
     assert cert is not None
-    assert cert.leader_id == "a2"
     assert cert.term_num == 9

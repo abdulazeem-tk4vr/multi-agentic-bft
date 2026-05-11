@@ -25,7 +25,7 @@ from .logutil import get_aegean_logger
 #: ``"voting"`` is a legacy alias for **refinement** (pre–Phase-1/2 graph); new protocol rows use **refinement**.
 AegeanPhase = Literal["proposal", "refinement", "voting", "commit", "done"]
 AgentVoteStatus = Literal["pending", "accept", "reject", "timeout", "byzantine"]
-TerminationReason = Literal["consensus", "max_rounds", "timeout", "byzantine_failure", "error"]
+TerminationReason = Literal["consensus", "max_rounds", "timeout", "byzantine_failure", "cancelled", "error"]
 
 _log = get_aegean_logger("paper")
 

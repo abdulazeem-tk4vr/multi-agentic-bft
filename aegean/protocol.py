@@ -19,8 +19,13 @@ from .election import (
 from .election_transport import run_election_with_messenger
 from .events import (
     EventBus,
+    emit_aegean_new_term_ack_received,
+    emit_aegean_new_term_started,
     emit_aegean_quorum_detected,
+    emit_aegean_recovery_selected,
+    emit_aegean_request_vote_sent,
     emit_aegean_round_started,
+    emit_aegean_vote_quorum_result,
     emit_aegean_vote_collected,
     emit_protocol_completed,
     emit_protocol_iteration,
@@ -43,6 +48,7 @@ from .types import (
     AegeanRound,
     AgentVote,
     CommitCertificate,
+    NewTermAckPayload,
     QuorumStatus,
     calculate_quorum_size,
     is_consensus_failed,
@@ -236,6 +242,14 @@ class AegeanProtocol:
                             f"({agent.__class__.__module__}.{agent.__class__.__name__})"
                         ),
                     }
+        if "recovery" in config:
+            return {
+                "ok": False,
+                "error": (
+                    "Legacy session_cfg['recovery'] is no longer supported; "
+                    "use session_cfg['new_term_ack_provider'] for runtime recovery input."
+                ),
+            }
 
         start = now_ms()
         emit_protocol_started(
@@ -246,7 +260,7 @@ class AegeanProtocol:
         )
 
         if self.cancelled:
-            res = self._final_result(start, [], "error", None, 0, None)
+            res = self._final_result(start, [], "cancelled", None, 0, None)
             self._emit_done(res, config["session_id"])
             return {"ok": True, "value": res}
 
@@ -258,27 +272,9 @@ class AegeanProtocol:
         any_wall_timeout = False
         commit_certificate: CommitCertificate | None = None
 
-        recovery_cfg = config.get("recovery")
         term_num = 1
         skipped_soln = False
         broadcast_bar = []
-        if isinstance(recovery_cfg, dict):
-            raw_acks = recovery_cfg.get("acks")
-            if raw_acks:
-                acks = [new_term_ack_from_mapping(x) for x in raw_acks]
-                if not recovery_acks_all_bottom(acks):
-                    picked = select_recovery_ack(acks)
-                    if picked is not None:
-                        leader_id = str(recovery_cfg.get("leader_id", leader_id))
-                        term_num = picked.term
-                        broadcast_bar = as_refinement_list(picked.refm_set)
-                        skipped_soln = True
-                        _log.info(
-                            "recovery: skip Round 0 Soln term=%s leader=%s r_bar_len=%s",
-                            term_num,
-                            leader_id,
-                            len(broadcast_bar),
-                        )
 
         if agents.get(leader_id) is None:
             return {"ok": False, "error": f"Leader agent not found: {leader_id}"}
@@ -304,13 +300,23 @@ class AegeanProtocol:
 
         attempt_term = term_num
         el_out = None
+        leader_idx = experts.index(leader_id)
         for election_try in range(max_election_tries):
+            candidate_id = experts[(leader_idx + election_try) % n]
+            emit_aegean_request_vote_sent(
+                self.event_bus,
+                term_num=attempt_term,
+                candidate_id=candidate_id,
+                attempt=election_try + 1,
+                max_attempts=max_election_tries,
+                session_id=config["session_id"],
+            )
             if custom_messenger is not None:
                 el_out = run_election_with_messenger(
                     experts,
                     f,
                     term=attempt_term,
-                    candidate_id=leader_id,
+                    candidate_id=candidate_id,
                     messenger=custom_messenger,
                 )
             else:
@@ -319,21 +325,33 @@ class AegeanProtocol:
                     experts,
                     f,
                     term=attempt_term,
-                    candidate_id=leader_id,
+                    candidate_id=candidate_id,
                     states=election_states,
                 )
+            emit_aegean_vote_quorum_result(
+                self.event_bus,
+                term_num=attempt_term,
+                candidate_id=candidate_id,
+                has_quorum=bool(el_out.has_vote_quorum),
+                try_num=election_try + 1,
+                max_attempts=max_election_tries,
+                session_id=config["session_id"],
+            )
             if el_out.has_vote_quorum:
+                leader_id = candidate_id
                 term_num = attempt_term
                 if election_try > 0:
                     _log.info(
-                        "election recovered after term bump: term=%s (after %s stall retries)",
+                        "election recovered after retries: term=%s leader=%s (after %s retries)",
                         term_num,
+                        leader_id,
                         election_try,
                     )
                 break
             _log.info(
-                "election stall: no Vote quorum at term=%s (try %s/%s), bumping term",
+                "election stall: no Vote quorum at term=%s candidate=%s (try %s/%s), rotating candidate and bumping term",
                 attempt_term,
+                candidate_id,
                 election_try + 1,
                 max_election_tries,
             )
@@ -346,6 +364,66 @@ class AegeanProtocol:
                     f"(last term tried {attempt_term})"
                 ),
             }
+
+        emit_aegean_new_term_started(
+            self.event_bus,
+            term_num=term_num,
+            leader_id=leader_id,
+            session_id=config["session_id"],
+        )
+
+        def _coerce_ack_rows(raw: Any) -> list[NewTermAckPayload]:
+            if not isinstance(raw, list):
+                return []
+            out: list[NewTermAckPayload] = []
+            for row in raw:
+                if isinstance(row, NewTermAckPayload):
+                    out.append(row)
+                elif isinstance(row, dict):
+                    try:
+                        out.append(new_term_ack_from_mapping(row))
+                    except Exception:
+                        continue
+            return out
+
+        ack_rows: list[NewTermAckPayload] = []
+        ack_provider = config.get("new_term_ack_provider")
+        if callable(ack_provider):
+            try:
+                ack_rows = _coerce_ack_rows(ack_provider(experts, term_num, leader_id))
+            except Exception:
+                ack_rows = []
+
+        for ack in ack_rows:
+            emit_aegean_new_term_ack_received(
+                self.event_bus,
+                term_num=term_num,
+                from_agent_id=ack.agent_id,
+                ack_term=ack.term,
+                ack_round_num=ack.round_num,
+                has_refm_set=bool(as_refinement_list(ack.refm_set)),
+                session_id=config["session_id"],
+            )
+        if not recovery_acks_all_bottom(ack_rows):
+            picked = select_recovery_ack(ack_rows)
+            if picked is not None:
+                term_num = picked.term
+                broadcast_bar = as_refinement_list(picked.refm_set)
+                skipped_soln = True
+                _log.info(
+                    "recovery: skip Round 0 Soln term=%s leader=%s r_bar_len=%s",
+                    term_num,
+                    leader_id,
+                    len(broadcast_bar),
+                )
+                emit_aegean_recovery_selected(
+                    self.event_bus,
+                    term_num=term_num,
+                    leader_id=leader_id,
+                    round_num=picked.round_num,
+                    refm_set_size=len(broadcast_bar),
+                    session_id=config["session_id"],
+                )
 
         if skipped_soln and len(broadcast_bar) < quorum_r:
             emit_protocol_iteration(
@@ -400,7 +478,7 @@ class AegeanProtocol:
                     is_cancelled=lambda: self.cancelled,
                 )
             if soln_cancelled:
-                res = self._final_result(start, rounds, "error", None, total_tokens, None)
+                res = self._final_result(start, rounds, "cancelled", None, total_tokens, None)
                 self._emit_done(res, config["session_id"])
                 return {"ok": True, "value": res}
             if soln_wall_to:
@@ -409,7 +487,7 @@ class AegeanProtocol:
             soln_votes: list[AgentVote] = []
             soln_out: list[Any | None] = []
             t0 = 0
-            for eid, (v, o, tok) in zip(experts, soln_rows, strict=True):
+            for eid, (v, o, tok) in zip(experts, soln_rows):
                 soln_votes.append(v)
                 soln_out.append(o if v.status == "accept" else None)
                 t0 += tok
@@ -487,7 +565,7 @@ class AegeanProtocol:
         ref_round = 1
         while ref_round <= self.config.max_rounds:
             if self.cancelled:
-                reason = "error"
+                reason = "cancelled"
                 break
 
             rs = now_ms()
@@ -532,7 +610,7 @@ class AegeanProtocol:
                     is_cancelled=lambda: self.cancelled,
                 )
             if ref_cancelled:
-                reason = "error"
+                reason = "cancelled"
                 break
             if ref_wall_to:
                 any_wall_timeout = True
@@ -540,7 +618,7 @@ class AegeanProtocol:
             ref_votes: list[AgentVote] = []
             ref_out: list[Any | None] = []
             tr = 0
-            for eid, (v, o, tok) in zip(experts, ref_rows, strict=True):
+            for eid, (v, o, tok) in zip(experts, ref_rows):
                 ref_votes.append(v)
                 ref_out.append(o if v.status == "accept" else None)
                 tr += tok
@@ -632,7 +710,7 @@ class AegeanProtocol:
                 consensus_value = decision.value
                 reason = "consensus"
                 supporting = tuple(
-                    eid for eid, rv in zip(experts, ref_votes, strict=True) if rv.status == "accept"
+                    eid for eid, rv in zip(experts, ref_votes) if rv.status == "accept"
                 )
                 commit_certificate = CommitCertificate(
                     term_num=term_num,
@@ -697,7 +775,7 @@ class AegeanProtocol:
             )
             ref_round += 1
 
-        if reason not in ("consensus", "error") and any_wall_timeout:
+        if reason not in ("consensus", "cancelled", "error") and any_wall_timeout:
             reason = "timeout"
 
         res = self._final_result(start, rounds, reason, consensus_value, total_tokens, commit_certificate)

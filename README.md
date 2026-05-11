@@ -130,7 +130,7 @@ Each worker: **POST** body `{"task": <dict>, "agent_id": "<id>"}`; response = sa
 
 | Piece | Role |
 |-------|------|
-| **`session_cfg`** | `session_id`, **`experts`** (ordered list), **`task`** (`id`, `description`, `context`), optional `recovery`, `election_messenger`, … |
+| **`session_cfg`** | `session_id`, **`experts`** (ordered list), **`task`** (`id`, `description`, `context`), optional `new_term_ack_provider`, `election_messenger`, … (`recovery` is removed) |
 | **`agents`** | `dict[expert_id, agent]` with **`execute(task) -> dict`** |
 | **`AegeanConfig`** | **`alpha`**, **`beta`**, **`max_rounds`**, timeouts, **`byzantine_tolerance`**, **`confidence_threshold`**, **`session_trace`**, … |
 

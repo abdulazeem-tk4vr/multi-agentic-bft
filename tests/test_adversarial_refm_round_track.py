@@ -77,13 +77,12 @@ def test_recovery_plus_stale_track_blocks_refinement():
         event_bus=EventBus(),
     )
     cfg = create_test_config(["a1", "a2", "a3"])
-    cfg["recovery"] = {
-        "leader_id": "a1",
-        "acks": [
+    cfg["new_term_ack_provider"] = (
+        lambda experts, term_num, leader_id: [
             {"term": 6, "agent_id": "a1", "refm_set": ["x", "x", "x"], "round_num": 2},
             {"term": 6, "agent_id": "a2", "refm_set": ["x", "x", "x"], "round_num": 2},
-        ],
-    }
+        ]
+    )
     cfg["refm_round_track_init"] = {"a1": 9, "a2": 9, "a3": 9}
     agents = {
         "a1": MockAgent("a1", proposal_output="x", refm_output="x"),

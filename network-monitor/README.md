@@ -23,7 +23,7 @@ py -3 -m network_monitor
 
 On **Git Bash**: `export PYTHONPATH=network-monitor`.
 
-Then open the printed URL (or let the launcher open a browser). Fill the **left panel**, click **Run Aegean session**. The map, quorum ring, and event log update live; **Run** is disabled while `run_status` is `running` and **Cancel run** is enabled.
+Then open the printed URL (or let the launcher open a browser). Fill the **left panel**, pick worker transport (`http` or persistent-session `tcp`), click **Run Aegean session**. The map, quorum ring, and event log update live; **Run** is disabled while `run_status` is `running` and **Cancel run** is enabled.
 
 ## API (localhost)
 
@@ -32,7 +32,7 @@ Then open the printed URL (or let the launcher open a browser). Fill the **left 
 | `GET` | `/` | Web UI |
 | `GET` | `/api/state` | JSON snapshot (poll) |
 | `GET` | `/api/capabilities` | `{ "openrouter": bool, "model_default": "..." }` |
-| `POST` | `/api/run` | JSON body = same fields as the form (see `runner._parse_spec`) |
+| `POST` | `/api/run` | JSON body = same fields as the form (see `runner._parse_spec`, includes `transport`) |
 | `POST` | `/api/cancel` | Request immediate cancellation of the active run |
 
 ## Preset demo run
@@ -66,6 +66,8 @@ py -3 examples/simple_cluster.py
 | `network_monitor/state.py` | Snapshot + `run_status` |
 | `network_monitor/server.py` | HTTP + `POST /api/run` |
 | `network_monitor/static/index.html` | Form + canvas |
+| `network_monitor/tcp_session.py` | Framed JSON TCP read/write + persistent session client |
+| `network_monitor/transport.py` | Session transport abstraction + TCP transport adapter |
 
 ## Library integration
 

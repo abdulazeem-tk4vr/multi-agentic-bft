@@ -13,7 +13,7 @@ Ordered roadmap for `multi-agentic-bft` (Aegean) and the SOC L1 line of work des
 - Run the full **`multi-agentic-bft`** test suite (`pytest`) on a clean environment; fix any drift or env assumptions.
 - Exercise **happy paths** with existing mocks (`aegean.mocks`): Soln quorum → at least one Refm round → **commit** when α/β and `max_rounds` allow (see `tests/test_aegean_*`).
 - Spot-check **failure paths**: no Soln quorum, leader Soln failure, Refm quorum loss, `max_rounds` without commit, optional recovery / `refm_round_track_init` scenarios if relevant.
-- Record **one** minimal “smoke” command sequence in a short note (or CI job) so regressions are obvious.
+- Record **one** minimal "smoke" command sequence in a short note (or CI job) so regressions are obvious.
 
 **Exit criteria**
 

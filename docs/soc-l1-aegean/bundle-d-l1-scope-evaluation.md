@@ -96,7 +96,7 @@ L1 is a decision and documentation job. Your system does both.
 
 **Response** (harder)
 
-- Define a **rubric** for “appropriate response” when labels are thin — methodology contribution.
+- Define a **rubric** for "appropriate response" when labels are thin — methodology contribution.
 
 ## Mismatch workflow (rule vs agents)
 

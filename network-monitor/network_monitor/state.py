@@ -150,6 +150,45 @@ class VizState:
                         "required": int(self._quorum_r),
                     }
                 )
+            elif topic == "protocol.aegean.request_vote_sent":
+                term = payload.get("termNum")
+                cand = payload.get("candidateId")
+                attempt = payload.get("attempt")
+                max_attempts = payload.get("maxAttempts")
+                self._push_log("election", f"RequestVote term={term} candidate={cand} try={attempt}/{max_attempts}")
+            elif topic == "protocol.aegean.vote_quorum_result":
+                term = payload.get("termNum")
+                cand = payload.get("candidateId")
+                ok = bool(payload.get("hasQuorum", False))
+                attempt = payload.get("attempt")
+                max_attempts = payload.get("maxAttempts")
+                self._push_log(
+                    "election",
+                    f"Vote quorum term={term} candidate={cand} ok={ok} try={attempt}/{max_attempts}",
+                )
+            elif topic == "protocol.aegean.recovery_selected":
+                term = payload.get("termNum")
+                leader = payload.get("leaderId")
+                rnum = payload.get("roundNum")
+                rsize = payload.get("refmSetSize")
+                self._push_log(
+                    "recovery",
+                    f"selected term={term} leader={leader} round={rnum} refm_set={rsize}",
+                )
+            elif topic == "protocol.aegean.new_term_started":
+                term = payload.get("termNum")
+                leader = payload.get("leaderId")
+                self._push_log("recovery", f"NewTerm term={term} leader={leader}")
+            elif topic == "protocol.aegean.new_term_ack_received":
+                term = payload.get("termNum")
+                src = payload.get("fromAgentId")
+                aterm = payload.get("ackTerm")
+                around = payload.get("ackRoundNum")
+                has_refm = bool(payload.get("hasRefmSet", False))
+                self._push_log(
+                    "recovery",
+                    f"NewTermAck from={src} term={term} ack_term={aterm} ack_round={around} refm={has_refm}",
+                )
             elif topic == "protocol.iteration":
                 self._iter_round = payload.get("round")
                 self._iter_status = str(payload.get("status", ""))

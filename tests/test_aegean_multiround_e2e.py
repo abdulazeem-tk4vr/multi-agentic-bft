@@ -105,3 +105,24 @@ def test_cancel_execution_gracefully():
     result = protocol.execute(config, agents)
     assert result["ok"] is True
     assert result["value"].consensus_reached is False
+    assert result["value"].termination_reason == "cancelled"
+
+
+def test_leader_stays_constant_within_term():
+    bus = EventBus()
+    protocol = create_aegean_protocol(
+        config=AegeanConfig(max_rounds=3, early_termination=False, alpha=2, beta=2),
+        event_bus=bus,
+    )
+    config = create_test_config(["a1", "a2", "a3"], session_id="leader-term-stability")
+    agents = {
+        "a1": MockAgent("a1", proposal_output="x", vote_output="x", refm_output="x"),
+        "a2": MockAgent("a2", proposal_output="x", vote_output="x", refm_output="x"),
+        "a3": MockAgent("a3", proposal_output="x", vote_output="x", refm_output="x"),
+    }
+    result = protocol.execute(config, agents)
+    assert result["ok"] is True
+    rounds = [e for e in bus.emitted_events if e["topic"] == "protocol.aegean.round_started"]
+    assert rounds, "expected round_started events"
+    leaders = {str(e["payload"].get("leaderId", "")) for e in rounds}
+    assert len(leaders) == 1

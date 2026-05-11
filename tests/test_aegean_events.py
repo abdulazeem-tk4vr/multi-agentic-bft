@@ -1,7 +1,12 @@
 from aegean.events import (
     EventBus,
+    emit_aegean_new_term_ack_received,
+    emit_aegean_new_term_started,
     emit_aegean_quorum_detected,
+    emit_aegean_recovery_selected,
+    emit_aegean_request_vote_sent,
     emit_aegean_round_started,
+    emit_aegean_vote_quorum_result,
     emit_aegean_vote_collected,
     emit_protocol_completed,
     emit_protocol_iteration,
@@ -77,3 +82,48 @@ def test_phase_event_emitters():
     assert "protocol.aegean.round_started" in topics
     assert "protocol.aegean.vote_collected" in topics
     assert "protocol.aegean.quorum_detected" in topics
+
+
+def test_new_election_and_recovery_emitters():
+    bus = EventBus()
+    emit_aegean_request_vote_sent(
+        bus,
+        term_num=2,
+        candidate_id="a1",
+        attempt=1,
+        max_attempts=3,
+        session_id="s1",
+    )
+    emit_aegean_vote_quorum_result(
+        bus,
+        term_num=2,
+        candidate_id="a1",
+        has_quorum=True,
+        try_num=1,
+        max_attempts=3,
+        session_id="s1",
+    )
+    emit_aegean_new_term_started(bus, term_num=2, leader_id="a1", session_id="s1")
+    emit_aegean_new_term_ack_received(
+        bus,
+        term_num=2,
+        from_agent_id="a2",
+        ack_term=2,
+        ack_round_num=1,
+        has_refm_set=True,
+        session_id="s1",
+    )
+    emit_aegean_recovery_selected(
+        bus,
+        term_num=2,
+        leader_id="a1",
+        round_num=1,
+        refm_set_size=3,
+        session_id="s1",
+    )
+    topics = [e["topic"] for e in bus.emitted_events]
+    assert "protocol.aegean.request_vote_sent" in topics
+    assert "protocol.aegean.vote_quorum_result" in topics
+    assert "protocol.aegean.new_term_started" in topics
+    assert "protocol.aegean.new_term_ack_received" in topics
+    assert "protocol.aegean.recovery_selected" in topics

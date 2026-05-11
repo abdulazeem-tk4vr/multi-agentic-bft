@@ -23,6 +23,7 @@
     .row { margin-bottom:10px; }
     label { display:block; margin-bottom:4px; color:var(--muted); font-size:10px; }
     input, textarea { width:100%; border:1px solid var(--line); border-radius:4px; background:#0a1018; color:var(--text); font-family:var(--font); padding:6px 8px; }
+    select { width:100%; border:1px solid var(--line); border-radius:4px; background:#0a1018; color:var(--text); font-family:var(--font); padding:6px 8px; }
     textarea { min-height:72px; resize:vertical; }
     .inline { display:inline-flex; gap:10px; align-items:center; font-size:11px; color:var(--muted); margin:4px 0; }
     button { width:100%; margin-top:10px; border:0; border-radius:4px; padding:10px; font-weight:700; background:#197f6c; color:#fff; cursor:pointer; }
@@ -53,6 +54,12 @@
       <div class="row"><label for="task_id">Task id</label><input id="task_id" value="t1" /></div>
       <div class="row"><label for="task_description">Task / prompt</label><textarea id="task_description">Pick a short one-word codename.</textarea></div>
       <div class="row"><label for="openrouter_base_port">OpenRouter local base port</label><input id="openrouter_base_port" type="number" min="1024" max="65500" value="18700" /></div>
+      <div class="row"><label for="transport">Worker transport</label>
+        <select id="transport">
+          <option value="http">http</option>
+          <option value="tcp">tcp (persistent session)</option>
+        </select>
+      </div>
       <div class="row"><label for="max_rounds">max_rounds</label><input id="max_rounds" type="number" min="0" max="99" value="5" /></div>
       <div class="row"><label for="alpha">alpha</label><input id="alpha" type="number" min="1" max="32" value="2" /></div>
       <div class="row"><label for="beta">beta</label><input id="beta" type="number" min="1" max="32" value="2" /></div>
@@ -144,6 +151,7 @@
         task_id: v("task_id").trim() || "t1",
         task_description: v("task_description").trim(),
         openrouter_base_port: parseInt(v("openrouter_base_port"), 10) || 18700,
+        transport: v("transport"),
         max_rounds: parseInt(v("max_rounds"), 10),
         alpha: parseInt(v("alpha"), 10),
         beta: parseInt(v("beta"), 10),
@@ -332,6 +340,40 @@
       ctx.fillText(msg.slice(0, 26), cx, by + 14);
     }
 
+    function drawLeaderCap(x, y) {
+      // Mortarboard icon above leader card.
+      const cy = y - 42;
+      ctx.save();
+      ctx.fillStyle = "rgba(240,200,94,0.95)";
+      ctx.strokeStyle = "rgba(255,240,180,0.95)";
+      ctx.lineWidth = 1.2;
+      // Top board (diamond)
+      ctx.beginPath();
+      ctx.moveTo(x - 12, cy);
+      ctx.lineTo(x, cy - 6);
+      ctx.lineTo(x + 12, cy);
+      ctx.lineTo(x, cy + 6);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      // Cap base
+      ctx.fillStyle = "rgba(240,200,94,0.92)";
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(x - 7, cy + 5, 14, 4, 2);
+      else ctx.rect(x - 7, cy + 5, 14, 4);
+      ctx.fill();
+      // Tassel
+      ctx.strokeStyle = "rgba(240,200,94,0.9)";
+      ctx.beginPath();
+      ctx.moveTo(x + 6, cy);
+      ctx.lineTo(x + 13, cy + 10);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(x + 13, cy + 11.5, 1.8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
     function draw(s) {
       const rect = canvas.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
@@ -359,6 +401,7 @@
         ctx.fill(); ctx.stroke();
         ctx.fillStyle = experts[i] === leaderId ? "#f0c85e" : "#7dffe8";
         ctx.font = "bold 12px JetBrains Mono, Consolas, monospace"; ctx.textAlign = "center"; ctx.fillText(experts[i], x, y - 6);
+        if (experts[i] === leaderId) drawLeaderCap(x, y);
         drawAgentOutbox(x, y + 16, sends[experts[i]], a, w, h);
       }
       ctx.beginPath(); ctx.arc(cx, cy, 48, 0, Math.PI * 2); ctx.fillStyle = "#123"; ctx.fill(); ctx.strokeStyle = "#2ee6c8"; ctx.stroke();

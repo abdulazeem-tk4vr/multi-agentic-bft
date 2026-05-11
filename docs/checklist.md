@@ -35,14 +35,14 @@ Working target: **paper-faithful fail-stop Aegean** in `aegean/` (`R = N − f`,
 
 ### Slice 6 — Single-term paper coordinator (Soln quorum → Refm + engine)
 - **`aegean/types.py`**: **`AegeanConfig.alpha`**, **`AegeanConfig.beta`** (defaults **2**).
-- **`aegean/protocol.py`**: **`execute`** runs **round 0 Soln** then **Refm** iterations with **`DecisionEngine`**; **`term_num`** is **1** for normal runs or the recovered term when **`config["recovery"]`** applies; **`build_refm_task`** uses that **`term_num`**.
+- **`aegean/protocol.py`**: **`execute`** runs **round 0 Soln** then **Refm** iterations with **`DecisionEngine`**; **`term_num`** is **1** for normal runs or the recovered term when runtime **`config["new_term_ack_provider"]`** yields non-bottom acks; **`build_refm_task`** uses that **`term_num`**.
 - **`tests/aegean_test_utils.MockAgent`**: **`refm_output`**, branches on **`aegean_task_phase`**.
 - **Tests**: protocol, quorum, multiround, leader, byzantine suites updated for Soln/Refm + shared **R̄** values so α/β can commit.
 
 ### Slice 7 — Election / NewTerm recovery (library + coordinator hook)
 - **`aegean/types.py`**: **`REFM_BOTTOM`**, **`is_refm_bottom`**, **`NewTermAckPayload`**, **`RequestVoteMessage`**, **`VoteMessage`**.
 - **`aegean/election.py`**: **`request_vote_granted`**, **`LocalElectionState`** (one vote per term), **`select_recovery_ack`** / **`recovery_acks_all_bottom`**, **`as_refinement_list`**, **`new_term_ack_from_mapping`**, **`refm_set_update_allowed`** (incoming **round-num ≥ local**).
-- **`aegean/protocol.py`**: Optional **`config["recovery"]`** with **`leader_id`** and **`acks`** (dict rows). Non-bottom acks → **skip Round 0 Soln**, **`term_num`** from winning ack, first Refm uses **`round_num = 1`**; **`build_refm_task`** uses run **`term_num`**. All-bottom acks → **fresh Soln** as in plan extension. **`|R̄| < R`** after recovery → **`recovery_insufficient_bar`**, no rounds.
+- **`aegean/protocol.py`**: Runtime recovery source is **`config["new_term_ack_provider"]`** (hard-cut, no config `recovery.acks` fallback). Non-bottom acks → **skip Round 0 Soln**, **`term_num`** from winning ack, first Refm uses **`round_num = 1`**; **`build_refm_task`** uses run **`term_num`**. All-bottom/no acks → **fresh Soln**. **`|R̄| < R`** after recovery → **`recovery_insufficient_bar`**, no rounds.
 - **`aegean/__init__.py`**: Re-exports recovery / election / **REFM_BOTTOM** symbols.
 - **Tests**: `tests/test_election.py`, `tests/test_recovery_protocol.py`.
 

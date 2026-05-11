@@ -108,8 +108,13 @@ def create_vote_task(proposal: Proposal, agent_id: str) -> dict[str, Any]:
 def select_leader(experts: list[str], round_number: int) -> str:
     if not experts:
         return ""
-    seed = round_number * 2654435761
-    idx = abs(seed) % len(experts)
+    # Stable seed from expert ids so round 0 is not always experts[0].
+    seed = 2166136261  # FNV-1a offset basis (32-bit)
+    for ch in "|".join(experts):
+        seed ^= ord(ch)
+        seed = (seed * 16777619) & 0xFFFFFFFF
+    seed = (seed + (round_number + 1) * 2654435761) & 0xFFFFFFFF
+    idx = seed % len(experts)
     return experts[idx]
 
 

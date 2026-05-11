@@ -10,7 +10,7 @@ Source of truth: `code-projects/multi-agentic-bft/aegean/`.
 ## Round 0 — Soln (initial solutions)
 
 - Parallel `build_soln_task` per expert; votes `accept` if `execute` succeeds and metadata confidence ≥ threshold.
-- **Leader’s** Soln must `accept` or the session errors.
+- **Leader's** Soln must `accept` or the session errors.
 - **Soln quorum** required; else termination (e.g. `no_soln_quorum`).
 - **First R̄:** list of **accepted** outputs (not deduplicated; not a Python `set`).
 
@@ -25,12 +25,12 @@ Source of truth: `code-projects/multi-agentic-bft/aegean/`.
 Runs only after **Refm quorum** for that round.
 
 - **`r_bar_prev`:** previous `broadcast_bar`.
-- **`current_round_outputs`:** this round’s **accepted** Refm outputs.
+- **`current_round_outputs`:** this round's **accepted** Refm outputs.
 - **α:** equivalence clusters over outputs (`alpha_same`, default `==`); cluster must have **≥ α** members **and** intersect **`r_bar_prev`**. Deterministic choice among eligible clusters.
 - **β:** **consecutive** rounds where the **same chosen** eligible value persists (`beta_same`, default `==`); else stability resets. **`committed`** when stability ≥ β.
 - **Safety:** committed value is drawn from the **intersection** logic with prior R̄ (engine only promotes values tied to **`r_bar_prev`** in that step).
 
-If not committed: **`broadcast_bar` ←** this round’s accepted Refm outputs (`nxt`) for the next round.
+If not committed: **`broadcast_bar` ←** this round's accepted Refm outputs (`nxt`) for the next round.
 
 ## Outputs
 
