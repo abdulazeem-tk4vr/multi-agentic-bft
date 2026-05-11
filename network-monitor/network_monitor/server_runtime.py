@@ -37,6 +37,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
         if path in ("/", "/index.html"):
             self.path = "/index.html"
+            return super().do_GET()
+        if path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
         return super().do_GET()
 
     def do_POST(self) -> None:  # noqa: N802
@@ -57,7 +62,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except (json.JSONDecodeError, ValueError):
             self._write_json(400, {"ok": False, "error": "invalid JSON body"})
             return
-        out = self._viz.submit_run(body)
+        try:
+            out = self._viz.submit_run(body)
+        except Exception as exc:  # noqa: BLE001
+            self._write_json(400, {"ok": False, "error": str(exc)})
+            return
         self._write_json(200 if out.get("ok") else 400, out)
 
 

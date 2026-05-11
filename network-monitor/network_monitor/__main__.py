@@ -26,7 +26,7 @@ DEMO_SPEC = {
     "task_id": "t1",
     "task_description": "Pick a one-word codename.",
     "openrouter_base_port": 18_700,
-    "transport": "http",
+    "transport": "tcp",
     "max_rounds": 5,
     "alpha": 2,
     "beta": 2,
@@ -36,6 +36,7 @@ DEMO_SPEC = {
     "early_termination": True,
     "session_trace": False,
     "max_election_attempts": 32,
+    "semantic_equivalence_enabled": False,
 }
 
 

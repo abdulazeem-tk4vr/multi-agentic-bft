@@ -10,10 +10,13 @@ Session trace (summary, events, rounds) is printed by the library when
 ``AegeanConfig(session_trace=True)`` or env ``AEGEAN_SESSION_TRACE=1`` (to stderr).
 
 Run: ``python examples/simple_cluster.py``
+
+Quick env check (same ``.env`` rules as the network monitor): ``python examples/simple_cluster.py --check-env``
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -119,27 +122,103 @@ class ClusterRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
 def _load_dotenv() -> None:
-    """Load ``multi-agentic-bft/.env`` into ``os.environ`` if present (does not override existing vars)."""
-    path = Path(__file__).resolve().parent.parent / ".env"
-    if not path.is_file():
-        return
-    for raw in path.read_text(encoding="utf-8-sig").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
+    """Load ``.env`` files the same way as ``network_monitor.runner.load_dotenv`` (first wins per key)."""
+    root = _repo_root()
+    candidates = [
+        root / ".env",
+        root / "network-monitor" / ".env",
+        Path.cwd() / ".env",
+    ]
+    for path in candidates:
+        if not path.is_file():
             continue
-        if line.startswith("export "):
-            line = line[7:].strip()
-        if "=" not in line:
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except OSError:
             continue
-        key, _, val = line.partition("=")
-        key, val = key.strip(), val.strip().strip("'").strip('"')
-        if key and key not in os.environ:
-            os.environ[key] = val
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key, val = key.strip(), val.strip().strip("'").strip('"')
+            if key and key not in os.environ:
+                os.environ[key] = val
+
+
+def check_env() -> int:
+    """Print diagnostics for the same prerequisites the network monitor needs."""
+    _load_dotenv()
+    root = _repo_root()
+    print("simple_cluster — env check (same .env search order as network monitor)", flush=True)
+    print(f"  repo root: {root}", flush=True)
+    print(f"  cwd:       {Path.cwd()}", flush=True)
+    for label, p in (
+        ("repo/.env", root / ".env"),
+        ("network-monitor/.env", root / "network-monitor" / ".env"),
+        ("cwd/.env", Path.cwd() / ".env"),
+    ):
+        print(f"  {label}: {'found' if p.is_file() else 'missing'}  ({p})", flush=True)
+
+    key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if key:
+        tail = key[-4:] if len(key) > 4 else "****"
+        print(f"  OPENROUTER_API_KEY: set (len={len(key)}, ends with …{tail})", flush=True)
+    else:
+        print("  OPENROUTER_API_KEY: NOT set for this process", flush=True)
+
+    model = os.getenv("OPENROUTER_MODEL", "").strip() or "(default openai/gpt-4o-mini)"
+    print(f"  OPENROUTER_MODEL: {model}", flush=True)
+
+    n = len(EXPERT_IDS)
+    print(f"  experts: {EXPERT_IDS}  (N={n})", flush=True)
+    for i in range(n):
+        p = BASE_PORT + i
+        print(f"  worker port would be: 127.0.0.1:{p} ({EXPERT_IDS[i]})", flush=True)
+
+    try:
+        import hdbscan  # noqa: F401
+        import numpy  # noqa: F401
+        from sentence_transformers import SentenceTransformer  # noqa: F401
+
+        print("  semantic extras [semantic]: OK (hdbscan, numpy, sentence-transformers importable)", flush=True)
+    except ImportError as e:
+        print(f"  semantic extras [semantic]: NOT importable ({e})", flush=True)
+        print("    (Only needed if you enable semantic equivalence on the dashboard.)", flush=True)
+
+    if not key:
+        print("", flush=True)
+        print(
+            "Fix: add OPENROUTER_API_KEY to one of the .env paths above, or export it in this shell, "
+            "then re-run. Restart the network monitor after editing .env.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+    return 0
 
 
 def main() -> None:
     global _llm
+
+    parser = argparse.ArgumentParser(description="Aegean simple_cluster (HTTP workers + OpenRouter)")
+    parser.add_argument(
+        "--check-env",
+        action="store_true",
+        help="Print OpenRouter / .env / port diagnostics (no LLM run) and exit",
+    )
+    args = parser.parse_args()
+    if args.check_env:
+        raise SystemExit(check_env())
 
     _load_dotenv()
 
@@ -152,13 +231,14 @@ def main() -> None:
             "See https://openrouter.ai/",
             file=sys.stderr,
         )
+        print("Tip: run  python examples/simple_cluster.py --check-env  for file paths.", file=sys.stderr)
         sys.exit(1)
 
     model = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini").strip() or "openai/gpt-4o-mini"
     _llm = OpenRouterAgent(model=model, timeout_s=120.0)
 
     aegean_cfg = AegeanConfig(
-        max_rounds=5,
+        max_rounds=8,
         alpha=2,
         beta=2,
         early_termination=True,

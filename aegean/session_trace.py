@@ -166,9 +166,14 @@ def _print_round_compact(r: AegeanRound, idx: int, experts: list[str], file: IO[
         _p(file, "      votes  (none)")
 
     if r.decision_committed is not None:
+        score_tail = (
+            f"  stability_score={r.decision_stability_score}"
+            if r.decision_stability_score is not None
+            else ""
+        )
         _p(
             file,
-            f"      engine  commit={r.decision_committed}  beta_stability={r.decision_stability}  "
+            f"      engine  commit={r.decision_committed}  beta_stability={r.decision_stability}{score_tail}  "
             f"eligible={_snippet(r.decision_eligible, 60)!r}",
         )
         if r.decision_committed is False and r.phase == "refinement":

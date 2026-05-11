@@ -194,6 +194,11 @@ class AegeanProtocol:
         persisted RefmSet round guards (multi-term / stale delivery scenarios).
         ``max_election_attempts`` overrides :class:`~aegean.types.AegeanConfig.max_election_attempts`
         for election stall retries (bump term until Vote quorum or cap).
+
+        When :attr:`~aegean.types.AegeanConfig.semantic_equivalence` is enabled, optional
+        ``config["semantic_encode_fn"]`` may be set to ``Callable[[list[str]], numpy.ndarray]`` mapping
+        conclusion strings to an embedding matrix (same row order as accepted Refm rows). If omitted,
+        embeddings are produced locally via SimCSE (see ``pip install 'multi-agentic-bft[semantic]'``).
         """
 
         experts: list[str] = config["experts"]
@@ -547,8 +552,31 @@ class AegeanProtocol:
                 self._emit_done(res, config["session_id"])
                 return {"ok": True, "value": res}
 
-        engine = DecisionEngine(DecisionEngineConfig(self.config.alpha, self.config.beta))
-        engine.on_new_term(term_num)
+        use_semantic = (
+            self.config.semantic_equivalence is not None and self.config.semantic_equivalence.enabled
+        )
+        dissenting_ctx: list[str] = []
+        sem_tracker = None
+        sem_embedder = None
+        sem_cfg = None
+        engine: DecisionEngine | None = None
+        if use_semantic:
+            from .semantic_equivalence import (
+                SemanticSessionAccumulator,
+                SemanticStabilityTracker,
+                SimCSEEmbedder,
+            )
+
+            sem_cfg = self.config.semantic_equivalence
+            assert sem_cfg is not None
+            sem_embedder = SimCSEEmbedder(sem_cfg.simcse_model_name)
+            sem_tracker = SemanticStabilityTracker(sem_cfg.stability_score_threshold, n)
+            sem_tracker.on_new_term(term_num)
+            sem_acc = SemanticSessionAccumulator(stability_threshold=sem_cfg.stability_score_threshold)
+        else:
+            engine = DecisionEngine(DecisionEngineConfig(self.config.alpha, self.config.beta))
+            engine.on_new_term(term_num)
+            sem_acc = None
 
         ref_round_tracks = {e: PerAgentRefmRoundTrack() for e in experts}
         ri = config.get("refm_round_track_init")
@@ -562,6 +590,7 @@ class AegeanProtocol:
                 except (TypeError, ValueError):
                     _log.warning("ignore invalid refm_round_track_init[%s]=%r", key, val)
 
+        semantic_ref_holder: list[str | None] = [None]
         ref_round = 1
         while ref_round <= self.config.max_rounds:
             if self.cancelled:
@@ -584,6 +613,8 @@ class AegeanProtocol:
                     term_num=term_num,
                     round_num=ref_round,
                     agent_id=eid,
+                    dissenting_context=dissenting_ctx if dissenting_ctx else None,
+                    reference_answer=semantic_ref_holder[0],
                 )
                 if not refm_task_matches_round(tsk, ref_round):
                     return create_timeout_vote(eid, ref_pid), None, 0
@@ -680,7 +711,41 @@ class AegeanProtocol:
             )
 
             ref_vals = [ref_out[i] for i in range(n) if ref_votes[i].status == "accept"]
-            decision = engine.step(r_bar_prev=list(broadcast_bar), current_round_outputs=ref_vals)
+            if use_semantic:
+                from .semantic_equivalence import extract_conclusion, run_semantic_decision_step
+
+                assert sem_cfg is not None and sem_tracker is not None and sem_embedder is not None
+                accepted_pairs = [
+                    (experts[i], ref_out[i]) for i in range(n) if ref_votes[i].status == "accept"
+                ]
+                raw_enc = config.get("semantic_encode_fn")
+                encode_fn = raw_enc if callable(raw_enc) else None
+                decision, round_dissent, skip_semantic, sem_increment = run_semantic_decision_step(
+                    accepted=accepted_pairs,
+                    r_bar_prev=list(broadcast_bar),
+                    alpha=self.config.alpha,
+                    n_experts=n,
+                    sem_cfg=sem_cfg,
+                    embedder=sem_embedder,
+                    encode_fn=encode_fn,
+                    tracker=sem_tracker,
+                )
+                assert sem_acc is not None
+                sem_acc.record_round(
+                    accepted=accepted_pairs,
+                    skip_round=skip_semantic,
+                    candidate=decision.eligible_candidate,
+                    increment=sem_increment,
+                    dissent=list(round_dissent),
+                )
+                dissenting_ctx = list(round_dissent)
+                if not skip_semantic and decision.eligible_candidate is not None:
+                    semantic_ref_holder[0] = extract_conclusion(decision.eligible_candidate)
+                else:
+                    semantic_ref_holder[0] = None
+            else:
+                assert engine is not None
+                decision = engine.step(r_bar_prev=list(broadcast_bar), current_round_outputs=ref_vals)
             _log.debug(
                 "ref_round=%s committed=%s stability=%s candidate=%s",
                 ref_round,
@@ -701,6 +766,7 @@ class AegeanProtocol:
                     end_time=t_after_decision,
                     decision_committed=decision.committed,
                     decision_stability=decision.stability,
+                    decision_stability_score=decision.stability_score,
                     decision_eligible=decision.eligible_candidate,
                     decision_overturned=decision.overturned,
                 )
@@ -712,6 +778,10 @@ class AegeanProtocol:
                 supporting = tuple(
                     eid for eid, rv in zip(experts, ref_votes) if rv.status == "accept"
                 )
+                cert_kw: dict[str, Any] = {}
+                if use_semantic:
+                    cert_kw["stability_mode"] = "weighted_score"
+                    cert_kw["stability_score_at_commit"] = decision.stability_score
                 commit_certificate = CommitCertificate(
                     term_num=term_num,
                     refinement_round=ref_round,
@@ -721,6 +791,7 @@ class AegeanProtocol:
                     alpha=self.config.alpha,
                     beta=self.config.beta,
                     supporting_refm_agent_ids=supporting,
+                    **cert_kw,
                 )
                 commit_prop = create_proposal(ref_round, leader_id, [consensus_value])
                 rounds.append(
@@ -778,7 +849,29 @@ class AegeanProtocol:
         if reason not in ("consensus", "cancelled", "error") and any_wall_timeout:
             reason = "timeout"
 
-        res = self._final_result(start, rounds, reason, consensus_value, total_tokens, commit_certificate)
+        semantic_no_consensus: dict[str, Any] | None = None
+        if (
+            use_semantic
+            and sem_acc is not None
+            and sem_tracker is not None
+            and reason != "consensus"
+            and reason in ("max_rounds", "timeout")
+        ):
+            semantic_no_consensus = sem_acc.to_no_consensus_payload(
+                max_rounds=self.config.max_rounds,
+                last_running_score=sem_tracker.running_score,
+                last_tracked=sem_tracker.peek_tracked_candidate(),
+            )
+
+        res = self._final_result(
+            start,
+            rounds,
+            reason,
+            consensus_value,
+            total_tokens,
+            commit_certificate,
+            semantic_no_consensus=semantic_no_consensus,
+        )
         self._emit_done(res, config["session_id"])
         return {"ok": True, "value": res}
 
@@ -790,6 +883,8 @@ class AegeanProtocol:
         consensus_value: Any | None,
         total_tokens: int,
         commit_certificate: CommitCertificate | None,
+        *,
+        semantic_no_consensus: dict[str, Any] | None = None,
     ) -> AegeanResult:
         return AegeanResult(
             consensus_value=consensus_value,
@@ -800,6 +895,7 @@ class AegeanProtocol:
             rounds=rounds,
             termination_reason=reason,  # type: ignore[arg-type]
             commit_certificate=commit_certificate,
+            semantic_no_consensus=semantic_no_consensus,
         )
 
     def _emit_done(self, aegean_result: AegeanResult, session_id: str) -> None:

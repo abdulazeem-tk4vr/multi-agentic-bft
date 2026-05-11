@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from ..task_routing import aegean_task_phase
 from .base import error_result, ok_result
+
+# Maximum number of retry attempts on HTTP 429 / 503.
+_MAX_RETRIES = 5
+# Initial backoff in seconds; doubles each retry (capped at 60 s).
+_RETRY_BACKOFF_BASE = 4.0
 
 
 class OpenRouterAgent:
@@ -16,6 +22,9 @@ class OpenRouterAgent:
     The protocol only calls ``agent.execute(task)``.
     This adapter hides provider-specific API calls internally and returns the
     standard Aegean result shape.
+
+    Retries automatically on HTTP 429 (rate-limited) and 503 (overloaded) with
+    exponential backoff so free-tier concurrent workers do not fail immediately.
     """
 
     def __init__(
@@ -30,6 +39,8 @@ class OpenRouterAgent:
         site_url: str | None = None,
         temperature: float = 0.2,
         max_tokens: int | None = None,
+        max_retries: int = _MAX_RETRIES,
+        retry_backoff_base: float = _RETRY_BACKOFF_BASE,
     ) -> None:
         self.model = model
         self.api_key = api_key or os.getenv("OPENROUTER_API_KEY", "")
@@ -40,6 +51,8 @@ class OpenRouterAgent:
         self.site_url = site_url or os.getenv("OPENROUTER_SITE_URL")
         self.temperature = float(temperature)
         self.max_tokens = max_tokens
+        self.max_retries = int(max_retries)
+        self.retry_backoff_base = float(retry_backoff_base)
 
     def _build_messages(self, task: dict[str, Any]) -> list[dict[str, str]]:
         phase = aegean_task_phase(task)
@@ -80,11 +93,25 @@ class OpenRouterAgent:
             headers=headers,
             method="POST",
         )
-        try:
-            with urlopen(req, timeout=self.timeout_s) as resp:
-                raw = resp.read().decode("utf-8")
-        except (HTTPError, URLError, TimeoutError) as exc:
-            return error_result(f"openrouter request failed: {exc}")
+        raw: str = ""
+        last_exc: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                with urlopen(req, timeout=self.timeout_s) as resp:
+                    raw = resp.read().decode("utf-8")
+                last_exc = None
+                break
+            except HTTPError as exc:
+                if exc.code in (429, 503) and attempt < self.max_retries:
+                    wait = min(self.retry_backoff_base * (2 ** attempt), 60.0)
+                    time.sleep(wait)
+                    last_exc = exc
+                    continue
+                return error_result(f"openrouter request failed: {exc}")
+            except (URLError, TimeoutError) as exc:
+                return error_result(f"openrouter request failed: {exc}")
+        if last_exc is not None:
+            return error_result(f"openrouter request failed after {self.max_retries} retries: {last_exc}")
 
         try:
             data = json.loads(raw)

@@ -112,6 +112,8 @@ class AegeanRound:
     #: Populated on **refinement** rows after :class:`~aegean.decision_engine.DecisionEngine.step` (Phase 2 graph).
     decision_committed: bool | None = None
     decision_stability: int | None = None
+    #: When using weighted semantic stability, running score toward the commit threshold.
+    decision_stability_score: float | None = None
     decision_eligible: Any | None = None
     decision_overturned: bool | None = None
 
@@ -129,6 +131,44 @@ class CommitCertificate:
     beta: int
     #: Agents whose Refm output counted as an accept (ok response, confidence ≥ threshold) this round.
     supporting_refm_agent_ids: tuple[str, ...]
+    #: ``"count"`` = integer **β** rounds; ``"weighted_score"`` = semantic stability score threshold.
+    stability_mode: Literal["count", "weighted_score"] = "count"
+    #: Populated when ``stability_mode == "weighted_score"`` (score at commit time).
+    stability_score_at_commit: float | None = None
+
+
+@dataclass(frozen=True)
+class SemanticEquivalenceConfig:
+    """SimCSE + HDBSCAN semantic **α** + weighted stability (see ``aegean.semantic_equivalence``).
+
+    When ``enabled=False`` or the parent :class:`AegeanConfig` leaves ``semantic_equivalence`` as
+    ``None``, the coordinator uses the legacy :class:`~aegean.decision_engine.DecisionEngine` with
+    exact output equality for **α** (cluster size) and integer **β** (consecutive rounds).
+
+    When enabled, **α** is still the minimum count in the dominant cluster before the weighted
+    stability score increments; **β** is not a separate counter—tune
+    ``stability_score_threshold`` against the desired stability horizon (e.g. **2.0** for **N=3**
+    ≈ **β=2** under strong agreement).
+    """
+
+    enabled: bool = False
+    simcse_model_name: str = "princeton-nlp/sup-simcse-bert-base-uncased"
+    #: HDBSCAN ``min_cluster_size``. ``None`` (default) derives from **α** with
+    #: ``min(max(2, α), len(accepts))``. Set an int to override for advanced tuning.
+    hdbscan_min_cluster_size: int | None = None
+    hdbscan_min_samples: int | None = None
+    #: Cumulative weighted stability threshold (paper-style default **2.0** for **N=3**).
+    stability_score_threshold: float = 2.0
+    #: If True and ``N >= min_agents_to_discard_noise``, HDBSCAN noise (-1) is omitted from
+    #: dissenting context (default keeps noise as dissent for small ensembles).
+    discard_noise_from_dissent: bool = False
+    min_agents_to_discard_noise: int = 10
+    #: Cosine similarity threshold for the semantic R̄_prev gate.  A dominant-cluster
+    #: candidate qualifies as "in circulation" if its SimCSE embedding has cosine
+    #: similarity ≥ this value against any output from the previous round.  Default 0.80
+    #: is permissive enough to pass LLM paraphrases while blocking genuinely different
+    #: answers.  Set to 1.0 to restore the original exact-string-only behaviour.
+    r_bar_similarity_threshold: float = 0.80
 
 
 @dataclass(frozen=True)
@@ -141,6 +181,9 @@ class AegeanResult:
     rounds: list[AegeanRound]
     termination_reason: TerminationReason
     commit_certificate: CommitCertificate | None = None
+    #: When semantic equivalence is enabled and the session ends without commit (e.g. **Tmax**),
+    #: optional structured diagnostics (see ``aegean.semantic_equivalence.build_semantic_no_consensus_payload``).
+    semantic_no_consensus: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +206,9 @@ class AegeanConfig:
     #: :func:`~aegean.protocol.run_aegean_session` / :class:`~aegean.protocol.AegeanRunner`.
     #: Also enabled when env ``AEGEAN_SESSION_TRACE`` is ``1``, ``true``, ``yes``, or ``on``.
     session_trace: bool = False
+    #: When set with ``enabled=True``, use conclusion extraction + cascade matching for **α**/**β**
+    #: and weighted stability (see ``aegean.semantic_equivalence``). Default ``None`` = legacy ``==``.
+    semantic_equivalence: SemanticEquivalenceConfig | None = None
 
 
 def max_failstop_faults_allowed(total_agents: int) -> int:

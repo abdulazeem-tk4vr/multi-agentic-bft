@@ -53,6 +53,26 @@ def test_parse_spec_accepts_tcp_transport():
     assert transport == "tcp"
 
 
+def test_parse_spec_default_transport_is_tcp():
+    spec = dict(_base_spec("tcp"))
+    del spec["transport"]
+    _e, _t, _c, _bp, transport = _parse_spec(spec)
+    assert transport == "tcp"
+
+
+def test_parse_spec_null_numeric_fields_use_defaults():
+    """Browser JSON may send null for cleared number inputs (NaN → null)."""
+    spec = dict(_base_spec("tcp"))
+    spec["max_rounds"] = None
+    spec["alpha"] = None
+    spec["confidence_threshold"] = None
+    _e, _t, cfg, _bp, transport = _parse_spec(spec)
+    assert cfg.max_rounds == 5
+    assert cfg.alpha == 2
+    assert cfg.confidence_threshold == 0.7
+    assert transport == "tcp"
+
+
 def test_tcp_session_client_request_response():
     class _Handler(socketserver.StreamRequestHandler):
         def handle(self) -> None:

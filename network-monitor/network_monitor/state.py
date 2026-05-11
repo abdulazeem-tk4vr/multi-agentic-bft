@@ -63,6 +63,7 @@ class VizState:
         self._reason: str | None = None
         self._duration_ms: int | None = None
         self._cert: str | None = None
+        self._semantic_nc: dict[str, Any] | None = None
         self._run_status: str = "idle"
         self._run_error: str | None = None
 
@@ -245,17 +246,22 @@ class VizState:
         termination_reason: str,
         duration_ms: int,
         certificate: Any = None,
+        semantic_no_consensus: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             self._consensus = consensus_reached
             self._value = consensus_value
             self._reason = termination_reason
             self._duration_ms = duration_ms
+            self._semantic_nc = semantic_no_consensus
             if certificate is not None:
                 self._cert = repr(certificate)
+            extra = ""
+            if semantic_no_consensus:
+                extra = f" semantic_no_consensus_keys={list(semantic_no_consensus.keys())}"
             self._push_log(
                 "outcome",
-                f"consensus={consensus_reached} reason={termination_reason!r} value={consensus_value!r}",
+                f"consensus={consensus_reached} reason={termination_reason!r} value={consensus_value!r}{extra}",
             )
             self._bump()
 
@@ -275,6 +281,7 @@ class VizState:
             self._reason = None
             self._duration_ms = None
             self._cert = None
+            self._semantic_nc = None
             for a in self._agents.values():
                 a.last_preview = ""
                 a.last_phase = ""
@@ -312,6 +319,7 @@ class VizState:
                 "termination_reason": self._reason,
                 "duration_ms": self._duration_ms,
                 "certificate_summary": self._cert,
+                "semantic_no_consensus": self._semantic_nc,
                 "run_status": self._run_status,
                 "run_error": self._run_error,
             }

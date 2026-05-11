@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Aegean network monitor</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230f1520'/%3E%3Cpath d='M8 16 L16 10 L24 16 L16 22 Z' fill='%232ee6c8'/%3E%3C/svg%3E" />
   <style>
     :root { --bg:#070a10; --panel:#0f1520; --line:#1c2a3d; --text:#c8d4e4; --muted:#5a6d82; --ok:#3ddf8c; --bad:#ff6b6b; --cyan:#2ee6c8; --gold:#f0c85e; --font:"JetBrains Mono","Consolas",monospace; }
     * { box-sizing: border-box; }
@@ -56,17 +57,20 @@
       <div class="row"><label for="openrouter_base_port">OpenRouter local base port</label><input id="openrouter_base_port" type="number" min="1024" max="65500" value="18700" /></div>
       <div class="row"><label for="transport">Worker transport</label>
         <select id="transport">
+          <option value="tcp" selected>tcp (persistent session)</option>
           <option value="http">http</option>
-          <option value="tcp">tcp (persistent session)</option>
         </select>
       </div>
       <div class="row"><label for="max_rounds">max_rounds</label><input id="max_rounds" type="number" min="0" max="99" value="5" /></div>
-      <div class="row"><label for="alpha">alpha</label><input id="alpha" type="number" min="1" max="32" value="2" /></div>
+      <div class="row"><label for="alpha">alpha (paper quorum; HDBSCAN min_cluster_size when semantic is on)</label><input id="alpha" type="number" min="1" max="32" value="2" /></div>
       <div class="row"><label for="beta">beta</label><input id="beta" type="number" min="1" max="32" value="2" /></div>
       <div class="row"><label for="byzantine_tolerance">byzantine_tolerance</label><input id="byzantine_tolerance" type="number" min="0" max="16" value="0" /></div>
       <div class="row"><label for="confidence_threshold">confidence_threshold</label><input id="confidence_threshold" value="0.7" /></div>
       <div class="row"><label for="round_timeout_ms">round_timeout_ms</label><input id="round_timeout_ms" type="number" min="1000" value="60000" /></div>
       <div class="row"><label for="max_election_attempts">max_election_attempts</label><input id="max_election_attempts" type="number" min="1" value="32" /></div>
+      <div style="border-top:1px solid var(--line);margin:12px 0;padding-top:10px;color:var(--cyan);font-size:10px;letter-spacing:.06em">Semantic equivalence (local SimCSE + HDBSCAN)</div>
+      <div style="font-size:9px;color:var(--muted);margin:-4px 0 8px;line-height:1.4">Fixed model: princeton-nlp/sup-simcse-bert-base-uncased · stability threshold 2.0 · HDBSCAN <code>min_cluster_size</code> follows <strong>alpha</strong> only.</div>
+      <label class="inline"><input id="semantic_equivalence_enabled" type="checkbox" /> semantic_equivalence_enabled</label>
       <label class="inline"><input id="session_trace" type="checkbox" /> session_trace</label>
       <button id="run-btn">Run Aegean session</button>
       <button id="cancel-btn" disabled>Cancel run</button>
@@ -105,6 +109,14 @@
     function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
     function v(id) { return document.getElementById(id).value; }
     function c(id) { return document.getElementById(id).checked; }
+    function intField(id, fallback) {
+      const x = parseInt(v(id), 10);
+      return Number.isFinite(x) ? x : fallback;
+    }
+    function floatField(id, fallback) {
+      const x = parseFloat(v(id));
+      return Number.isFinite(x) ? x : fallback;
+    }
     function asId(x) {
       const s = (x == null ? "" : String(x)).trim();
       if (!s || s === "undefined" || s === "null") return "";
@@ -146,20 +158,21 @@
     function spec() {
       return {
         session_id: v("session_id").trim() || "dashboard",
-        n_agents: parseInt(v("n_agents"), 10) || 3,
+        n_agents: intField("n_agents", 3),
         expert_ids: v("expert_ids").trim(),
         task_id: v("task_id").trim() || "t1",
         task_description: v("task_description").trim(),
-        openrouter_base_port: parseInt(v("openrouter_base_port"), 10) || 18700,
+        openrouter_base_port: intField("openrouter_base_port", 18700),
         transport: v("transport"),
-        max_rounds: parseInt(v("max_rounds"), 10),
-        alpha: parseInt(v("alpha"), 10),
-        beta: parseInt(v("beta"), 10),
-        byzantine_tolerance: parseInt(v("byzantine_tolerance"), 10),
-        confidence_threshold: parseFloat(v("confidence_threshold")),
-        round_timeout_ms: parseInt(v("round_timeout_ms"), 10),
-        max_election_attempts: parseInt(v("max_election_attempts"), 10),
-        session_trace: c("session_trace")
+        max_rounds: intField("max_rounds", 5),
+        alpha: intField("alpha", 2),
+        beta: intField("beta", 2),
+        byzantine_tolerance: intField("byzantine_tolerance", 0),
+        confidence_threshold: floatField("confidence_threshold", 0.7),
+        round_timeout_ms: intField("round_timeout_ms", 60000),
+        max_election_attempts: intField("max_election_attempts", 32),
+        session_trace: c("session_trace"),
+        semantic_equivalence_enabled: c("semantic_equivalence_enabled")
       };
     }
 
@@ -174,7 +187,7 @@
           runBtn.disabled = true;
         } else {
           hint.className = "ok";
-          hint.textContent = "Ready. Model: " + (j.model_default || "openai/gpt-4o-mini");
+          hint.textContent = "Ready. Model: " + (j.model_default || "openai/gpt-4o-mini") + (c("semantic_equivalence_enabled") ? " · semantic: pip install multi-agentic-bft[semantic]" : "");
         }
       } catch (_e) {
         hint.className = "err";
@@ -186,9 +199,21 @@
       hint.className = "";
       hint.textContent = "Starting…";
       try {
-        const r = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec()) });
-        const j = await r.json();
-        if (!j.ok) { hint.className = "err"; hint.textContent = j.error || "request failed"; return; }
+        const r = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec()), cache: "no-store" });
+        let j = {};
+        try {
+          j = await r.json();
+        } catch (_parse) {
+          hint.className = "err";
+          hint.textContent = "Bad response (HTTP " + r.status + ")";
+          return;
+        }
+        if (!r.ok || !j.ok) {
+          hint.className = "err";
+          hint.textContent = j.error || ("HTTP " + r.status + " " + (r.statusText || ""));
+          console.error("[Aegean dashboard] /api/run rejected", r.status, j);
+          return;
+        }
         hint.className = "ok"; hint.textContent = "Run started.";
       } catch (e) {
         hint.className = "err"; hint.textContent = String(e);
@@ -412,9 +437,20 @@
     }
 
     function renderCore(s) {
+      core.style.whiteSpace = "";
       if (s.run_status === "error") { core.textContent = s.run_error || "error"; core.style.color = "#ff6b6b"; return; }
       if (s.consensus_reached === true) { core.textContent = String(s.consensus_value); core.style.color = "#3ddf8c"; return; }
       if (s.consensus_reached === false) {
+        if (s.semantic_no_consensus && (s.termination_reason === "max_rounds" || s.termination_reason === "timeout")) {
+          core.style.whiteSpace = "pre-wrap";
+          try {
+            core.textContent = JSON.stringify(s.semantic_no_consensus, null, 2);
+          } catch (_e) {
+            core.textContent = String(s.termination_reason || "no consensus");
+          }
+          core.style.color = "#ff8a65";
+          return;
+        }
         if (s.termination_reason === "max_rounds") {
           core.innerHTML = 'Stopped: max_rounds — no committed consensus value.<br><span style="color:#7a92a8;font-size:10px">A round can meet vote quorum without decision commit.</span>';
         } else {

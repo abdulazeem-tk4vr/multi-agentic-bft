@@ -32,6 +32,8 @@ class DecisionStepResult:
     stability: int
     eligible_candidate: Any | None
     overturned: bool
+    #: Populated when using :mod:`aegean.semantic_equivalence` (weighted stability toward **β** threshold).
+    stability_score: float | None = None
 
 
 def cluster_by_alpha_equivalence(
@@ -111,6 +113,7 @@ class DecisionEngine:
                 stability=0,
                 eligible_candidate=None,
                 overturned=False,
+                stability_score=None,
             )
 
         chosen = min(eligible_vals, key=_sort_key)
@@ -132,4 +135,5 @@ class DecisionEngine:
             stability=self._stability,
             eligible_candidate=chosen,
             overturned=overturned,
+            stability_score=None,
         )

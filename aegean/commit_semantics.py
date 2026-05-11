@@ -132,7 +132,7 @@ def validate_aegean_result_replay(result: AegeanResult) -> None:
 
 def commit_certificate_to_mapping(cert: CommitCertificate) -> dict[str, Any]:
     """JSON-friendly dict (tuples → lists)."""
-    return {
+    d: dict[str, Any] = {
         "term_num": cert.term_num,
         "refinement_round": cert.refinement_round,
         "leader_id": cert.leader_id,
@@ -141,13 +141,20 @@ def commit_certificate_to_mapping(cert: CommitCertificate) -> dict[str, Any]:
         "alpha": cert.alpha,
         "beta": cert.beta,
         "supporting_refm_agent_ids": list(cert.supporting_refm_agent_ids),
+        "stability_mode": cert.stability_mode,
+        "stability_score_at_commit": cert.stability_score_at_commit,
     }
+    return d
 
 
 def commit_certificate_from_mapping(payload: Mapping[str, Any]) -> CommitCertificate:
     """Inverse of :func:`commit_certificate_to_mapping`."""
     sup = payload["supporting_refm_agent_ids"]
     tup = tuple(sup) if isinstance(sup, list) else tuple(sup)
+    mode = payload.get("stability_mode", "count")
+    if mode not in ("count", "weighted_score"):
+        mode = "count"
+    score = payload.get("stability_score_at_commit")
     return CommitCertificate(
         term_num=int(payload["term_num"]),
         refinement_round=int(payload["refinement_round"]),
@@ -157,4 +164,6 @@ def commit_certificate_from_mapping(payload: Mapping[str, Any]) -> CommitCertifi
         alpha=int(payload["alpha"]),
         beta=int(payload["beta"]),
         supporting_refm_agent_ids=tup,
+        stability_mode=mode,  # type: ignore[arg-type]
+        stability_score_at_commit=float(score) if score is not None else None,
     )

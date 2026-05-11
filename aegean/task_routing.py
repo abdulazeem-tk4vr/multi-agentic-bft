@@ -80,8 +80,17 @@ def build_refm_task(
     round_num: int,
     agent_id: str,
     refinement_set_label: str = "Refinement set (R̄)",
+    dissenting_context: list[str] | None = None,
+    reference_answer: str | None = None,
 ) -> dict[str, Any]:
-    """Build a refinement reasoning task for one agent (paper **RefmSet** → **Refm**)."""
+    """Build a refinement reasoning task for one agent (paper **RefmSet** → **Refm**).
+
+    Optional ``dissenting_context`` carries minority-cluster conclusions from the semantic layer
+    (previous round); surfaced in the task description for every agent.
+
+    Optional ``reference_answer`` (semantic mode) labels the prior round’s SV / dominant-cluster
+    conclusion so experts can converge toward shared meaning, without changing **R̄** membership.
+    """
     ctx = dict(base.get("context") or {})
     aegean: dict[str, Any] = dict(ctx.get("aegean") or {})
     aegean.update(
@@ -93,12 +102,27 @@ def build_refm_task(
             "agent_id": str(agent_id),
         }
     )
+    if dissenting_context:
+        aegean["dissenting_context"] = list(dissenting_context)
+    if reference_answer:
+        aegean["reference_answer"] = str(reference_answer)
     ctx["aegean"] = aegean
     r_bar = json.dumps(refinement_set, indent=2, default=str)
     desc = (
         f"{base.get('description', '')}\n\n{REFM_PROMPT_HINT}\n\n"
         f"{refinement_set_label} for term {term_num}, round {round_num}:\n{r_bar}"
     ).strip()
+    if reference_answer:
+        desc = (
+            f"{desc}\n\nSemantic reference (dominant-cluster central answer from the prior round; "
+            f"converge toward a correct solution consistent with this when appropriate):\n{reference_answer}"
+        ).strip()
+    if dissenting_context:
+        block = "\n".join(dissenting_context)
+        desc = (
+            f"{desc}\n\nMinority / dissenting views (semantic clusters; weigh but do not treat as "
+            f"majority votes):\n{block}"
+        ).strip()
     tid = f"{base['id']}-refm-t{term_num}-r{round_num}-{agent_id}"
     return {**base, "id": tid, "description": desc, "context": ctx}
 

@@ -13,10 +13,19 @@ from typing import Any, Callable
 
 from aegean import AegeanConfig, AegeanRunner, http_agents_from_endpoints
 from aegean.adapters import OpenRouterAgent
-from aegean.types import calculate_quorum_size, validate_failstop_fault_bound
+from aegean.types import (
+    SemanticEquivalenceConfig,
+    calculate_quorum_size,
+    validate_failstop_fault_bound,
+)
 
 from .tcp_session import read_frame, write_frame
 from .transport import ExecuteContext, SessionAgentTransport, TcpSessionTransport
+
+# Dashboard-only: semantic equivalence uses a fixed embedding checkpoint and stability horizon.
+# HDBSCAN ``min_cluster_size`` always follows ``AegeanConfig.alpha`` (``SemanticEquivalenceConfig.hdbscan_min_cluster_size`` left ``None``).
+_DASHBOARD_SIMCSE_MODEL = "princeton-nlp/sup-simcse-bert-base-uncased"
+_DASHBOARD_SEMANTIC_STABILITY_THRESHOLD = 2.0
 
 
 class AgentRecoveryStore:
@@ -74,23 +83,33 @@ class AgentRecoveryStore:
 
 
 def load_dotenv(repo_root: Path) -> None:
+    """Load ``KEY=value`` pairs from several likely ``.env`` locations (first wins per key)."""
     import os
 
-    path = repo_root / ".env"
-    if not path.is_file():
-        return
-    for raw in path.read_text(encoding="utf-8-sig").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
+    candidates = [
+        repo_root / ".env",
+        repo_root / "network-monitor" / ".env",
+        Path.cwd() / ".env",
+    ]
+    for path in candidates:
+        if not path.is_file():
             continue
-        if line.startswith("export "):
-            line = line[7:].strip()
-        if "=" not in line:
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except OSError:
             continue
-        key, _, val = line.partition("=")
-        key, val = key.strip(), val.strip().strip("'").strip('"')
-        if key and key not in os.environ:
-            os.environ[key] = val
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key, val = key.strip(), val.strip().strip("'").strip('"')
+            if key and key not in os.environ:
+                os.environ[key] = val
 
 
 def _text_preview(text: Any, max_chars: int = 200) -> tuple[str, int]:
@@ -119,12 +138,46 @@ def _trace_worker(viz: Any, task: dict[str, Any], result: dict[str, Any]) -> Non
     viz.worker_trace(agent_id=agent, phase=phase, round_num=rnum, preview=prev, tokens=tok, ok=bool(result.get("ok")))
 
 
+def _coerce_bool(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    s = str(v).strip().lower()
+    return s in {"1", "true", "yes", "on"}
+
+
+def _json_int(data: dict[str, Any], key: str, default: int) -> int:
+    """JSON ``null`` or missing keys become ``default`` (browser ``NaN`` → ``null``)."""
+    raw = data.get(key, default)
+    if raw is None:
+        return int(default)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _json_float(data: dict[str, Any], key: str, default: float) -> float:
+    raw = data.get(key, default)
+    if raw is None:
+        return float(default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def _parse_spec(data: dict[str, Any]) -> tuple[list[str], dict[str, Any], AegeanConfig, int, str]:
-    n = int(data.get("n_agents", 3))
+    n = _json_int(data, "n_agents", 3)
     if n < 3 or n > 32:
         raise ValueError("n_agents must be between 3 and 32")
 
-    raw_ids = (data.get("expert_ids") or "").strip()
+    raw_ids = ""
+    ex_raw = data.get("expert_ids")
+    if ex_raw is not None:
+        raw_ids = str(ex_raw).strip() if not isinstance(ex_raw, str) else ex_raw.strip()
+
     if raw_ids:
         experts = [x.strip() for x in raw_ids.split(",") if x.strip()]
         if len(experts) != n:
@@ -134,38 +187,52 @@ def _parse_spec(data: dict[str, Any]) -> tuple[list[str], dict[str, Any], Aegean
     else:
         experts = [f"a{i}" for i in range(1, n + 1)]
 
-    desc = (data.get("task_description") or "").strip()
+    td_raw = data.get("task_description")
+    desc = str(td_raw).strip() if td_raw is not None else ""
     if not desc:
         raise ValueError("task_description is required")
 
     task_id = (data.get("task_id") or "t1").strip() or "t1"
     task: dict[str, Any] = {"id": task_id, "description": desc, "context": {}}
 
-    f = int(data.get("byzantine_tolerance", 0))
+    f = _json_int(data, "byzantine_tolerance", 0)
     validate_failstop_fault_bound(n, f)
-    alpha = int(data.get("alpha", 2))
-    beta = int(data.get("beta", 2))
+    alpha = _json_int(data, "alpha", 2)
+    beta = _json_int(data, "beta", 2)
     if alpha > n:
         alpha = n
 
+    sem_on = _coerce_bool(data.get("semantic_equivalence_enabled", False))
+    semantic_cfg: SemanticEquivalenceConfig | None = None
+    if sem_on:
+        semantic_cfg = SemanticEquivalenceConfig(
+            enabled=True,
+            simcse_model_name=_DASHBOARD_SIMCSE_MODEL,
+            hdbscan_min_cluster_size=None,
+            stability_score_threshold=float(_DASHBOARD_SEMANTIC_STABILITY_THRESHOLD),
+            discard_noise_from_dissent=False,
+            min_agents_to_discard_noise=10,
+        )
+
     cfg = AegeanConfig(
-        max_rounds=int(data.get("max_rounds", 5)),
+        max_rounds=_json_int(data, "max_rounds", 5),
         alpha=alpha,
         beta=beta,
         byzantine_tolerance=f,
-        confidence_threshold=float(data.get("confidence_threshold", 0.7)),
-        round_timeout_ms=int(data.get("round_timeout_ms", 60_000)),
-        early_termination=bool(data.get("early_termination", True)),
-        session_trace=bool(data.get("session_trace", False)),
-        max_election_attempts=int(data.get("max_election_attempts", 32)),
+        confidence_threshold=_json_float(data, "confidence_threshold", 0.7),
+        round_timeout_ms=_json_int(data, "round_timeout_ms", 60_000),
+        early_termination=_coerce_bool(data.get("early_termination", True)),
+        session_trace=_coerce_bool(data.get("session_trace", False)),
+        max_election_attempts=_json_int(data, "max_election_attempts", 32),
+        semantic_equivalence=semantic_cfg,
     )
     if cfg.alpha > n:
         cfg = dataclasses.replace(cfg, alpha=n)
 
-    base_port = int(data.get("openrouter_base_port", 18_700))
+    base_port = _json_int(data, "openrouter_base_port", 18_700)
     if base_port < 1024 or base_port > 65500:
         raise ValueError("openrouter_base_port out of range")
-    transport = str(data.get("transport", "http")).strip().lower() or "http"
+    transport = str(data.get("transport", "tcp")).strip().lower() or "tcp"
     if transport not in {"http", "tcp"}:
         raise ValueError("transport must be 'http' or 'tcp'")
     return experts, task, cfg, base_port, transport
@@ -176,11 +243,25 @@ def validate_spec_for_submit(spec: dict[str, Any], repo_root: Path) -> str | Non
 
     try:
         _parse_spec(spec)
-    except ValueError as e:
+    except (ValueError, TypeError) as e:
         return str(e)
     load_dotenv(repo_root)
     if not os.getenv("OPENROUTER_API_KEY", "").strip():
-        return "OPENROUTER_API_KEY not set (configure .env or environment)"
+        return (
+            "OPENROUTER_API_KEY is not set (or is blank). Add it to a .env file next to the repo "
+            "(multi-agentic-bft/.env), under network-monitor/.env, or in the current working directory, "
+            "then restart the monitor so the process picks it up."
+        )
+    if _coerce_bool(spec.get("semantic_equivalence_enabled", False)):
+        try:
+            import hdbscan  # noqa: F401
+            import numpy  # noqa: F401
+            from sentence_transformers import SentenceTransformer  # noqa: F401
+        except ImportError:
+            return (
+                "Semantic equivalence requires local ML deps. Install in the same env: "
+                "pip install 'multi-agentic-bft[semantic]'"
+            )
     return None
 
 

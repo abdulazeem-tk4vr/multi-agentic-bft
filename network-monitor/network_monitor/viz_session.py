@@ -48,6 +48,9 @@ class VizSession:
 
         err = validate_spec_for_submit(spec, self._repo_root)
         if err is not None:
+            import sys
+
+            print(f"[aegean-viz] POST /api/run rejected: {err}", file=sys.stderr, flush=True)
             return {"ok": False, "error": err}
         with self._run_lock:
             if self._running:
@@ -139,4 +142,5 @@ class VizSession:
             termination_reason=str(result.termination_reason),
             duration_ms=result.total_duration_ms,
             certificate=result.commit_certificate,
+            semantic_no_consensus=result.semantic_no_consensus,
         )
